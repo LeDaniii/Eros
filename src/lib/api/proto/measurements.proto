@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package metrics;
+
+// Ein Paket mit mehreren Messpunkten, um den Overhead pro Call zu senken
+message MeasurementBatch {
+  repeated float values = 1; // Die 10 kHz Rohdaten
+  int64 timestamp_start = 2; // Zeitstempel des ersten Punktes
+}
+
+service MeasurementService {
+  // Ein Server-Side Stream: Der Server pusht Daten, sobald sie vom Sensor kommen
+  rpc StreamMeasurements (Empty) returns (stream MeasurementBatch);
+}
+
+message Empty {}

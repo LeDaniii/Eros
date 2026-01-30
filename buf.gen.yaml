@@ -1,0 +1,17 @@
+# # buf.gen.yaml
+# version: v1
+# plugins:
+#   # Erzeugt die Basis-Nachrichten (Classes für MeasurementBatch etc.)
+#   - plugin: es
+#     out: src/gen
+#     opt: target=ts
+#   # Erzeugt den Service-Client für den Worker
+#   - plugin: connect-es
+#     out: src/gen
+#     opt: target=ts
+
+version: v2
+plugins:
+  - local: protoc-gen-es
+    out: src/gen
+    opt: target=ts

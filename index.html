@@ -1,13 +1,55 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>eros</title>
-  </head>
-  <body>
-    <div id="app"></div>
-    <script type="module" src="/src/main.ts"></script>
-  </body>
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Project Eros - 10kHz Real-Time Chart</title>
+  <style>
+    body {
+      margin: 0;
+      background-color: #1a1a1a;
+      color: white;
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #canvas-container {
+      position: relative;
+      width: 90vw;
+      height: 70vh;
+      border: 1px solid #444;
+    }
+
+    canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    .info {
+      margin-top: 1rem;
+      color: #00ff00;
+      font-family: monospace;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Project Eros: High-Performance WebGPU</h1>
+  <div id="canvas-container">
+    <canvas id="plotCanvas"></canvas>
+  </div>
+  <div class="info" id="status">Warte auf WebGPU Initialisierung...</div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+
 </html>
