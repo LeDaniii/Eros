@@ -54,38 +54,63 @@ let sharedBuffer: Float32Array;
 let headPointer: Int32Array;
 
 self.onmessage = async (e) => {
-    const { buffer, head } = e.data;
-    sharedBuffer = new Float32Array(buffer, 4);
-    headPointer = new Int32Array(head);
+    const { buffer, head, type } = e.data;
 
+    if (buffer && head) {
+        console.log("Worker: Received data");
+        console.log("Worker: buffer:", buffer);
+        console.log("Worker: head:", head);
+        // ENTFERNT: console.log("Worker: head type:", head.constructor.name);
+
+        // head ist ein Int32Array, buffer ist SharedArrayBuffer
+        headPointer = head;
+        sharedBuffer = new Float32Array(buffer, 4);
+
+        console.log("Worker: Setup complete");
+        console.log("Worker: headPointer.buffer instanceof SharedArrayBuffer:", headPointer.buffer instanceof SharedArrayBuffer);
+        console.log("Worker: sharedBuffer.buffer instanceof SharedArrayBuffer:", sharedBuffer.buffer instanceof SharedArrayBuffer);
+        return;
+    }
+
+    if (type === 'start') {
+        console.log("Worker: Start signal received");
+        await startStreaming();
+    }
+};
+
+async function startStreaming() {
     const transport = createConnectTransport({
         baseUrl: "http://localhost:50051",
+        useBinaryFormat: true,
     });
 
-    // In v2 nutzen wir das Schema direkt
     const client = createClient(MeasurementService, transport);
 
     try {
-        console.log("Worker: Verbindung steht. Warte auf Daten...");
-
-        // v2 Syntax: Wir rufen die Methode auf und erhalten einen AsyncIterable
+        console.log("Worker: Connecting to gRPC server...");
         const response = client.streamMeasurements({});
 
         for await (const batch of response) {
             let currentHead = Atomics.load(headPointer, 0);
 
-            // batch ist vom Typ MeasurementBatch
             if (batch.values && batch.values.length > 0) {
                 for (let i = 0; i < batch.values.length; i++) {
                     sharedBuffer[currentHead] = batch.values[i];
                     currentHead = (currentHead + 1) % sharedBuffer.length;
                 }
 
-                // Nur einmal pro Batch den Pointer updaten (Performance!)
                 Atomics.store(headPointer, 0, currentHead);
+
+                if (currentHead % 10000 === 0) {
+                    console.log(`Worker: Wrote ${currentHead} samples, value at 0:`, sharedBuffer[0]);
+                }
             }
         }
+
+        console.log("Worker: Stream completed successfully");
     } catch (error) {
-        console.error("gRPC Stream Error im Worker:", error);
+        console.error("gRPC Stream Error:", error);
     }
-};
+}
+
+console.log("Worker initialized and ready");

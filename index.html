@@ -4,26 +4,40 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Project Eros - 10kHz Real-Time Chart</title>
+  <title>Project Eros - Professional Measurement Viewer</title>
   <style>
-    body {
+    * {
       margin: 0;
-      background-color: #1a1a1a;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: linear-gradient(135deg, #1a1a1a 0%, #0a0a0a 100%);
       color: white;
-      font-family: sans-serif;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      overflow: hidden;
+      height: 100vh;
       display: flex;
       flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      height: 100vh;
-      overflow: hidden;
+    }
+
+    h1 {
+      text-align: center;
+      padding: 15px;
+      background: rgba(0, 0, 0, 0.8);
+      border-bottom: 2px solid #00ff00;
+      font-size: 24px;
+      text-shadow: 0 0 10px #00ff00;
     }
 
     #canvas-container {
       position: relative;
-      width: 90vw;
-      height: 70vh;
-      border: 1px solid #444;
+      flex: 1;
+      margin: 10px;
+      border: 2px solid #333;
+      background: #000;
+      box-shadow: 0 0 20px rgba(0, 255, 0, 0.2);
     }
 
     canvas {
@@ -35,19 +49,23 @@
     }
 
     .info {
-      margin-top: 1rem;
+      text-align: center;
+      padding: 10px;
       color: #00ff00;
       font-family: monospace;
+      font-size: 13px;
+      background: rgba(0, 0, 0, 0.8);
+      border-top: 1px solid #333;
     }
   </style>
 </head>
 
 <body>
-  <h1>Project Eros: High-Performance WebGPU</h1>
+  <h1>⚡ Project Eros WebGPU Measurement Viewer</h1>
   <div id="canvas-container">
     <canvas id="plotCanvas"></canvas>
   </div>
-  <div class="info" id="status">Warte auf WebGPU Initialisierung...</div>
+  <div class="info" id="status">Initializing WebGPU...</div>
 
   <script type="module" src="/src/main.ts"></script>
 </body>
