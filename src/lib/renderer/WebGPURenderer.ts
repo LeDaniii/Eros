@@ -113,6 +113,11 @@ export class WebGPURenderer {
         this.viewportOverride = null;
     }
 
+    // NEU: Viewport abfragen (für Crosshair)
+    public getViewport(): Viewport {
+        return { ...this.viewport };
+    }
+
     private createGPUResources() {
         if (!this.device || !this.ringBuffer) return;
 

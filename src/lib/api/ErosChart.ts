@@ -23,6 +23,7 @@
 
 import { WebGPURenderer } from '../renderer/WebGPURenderer';
 import { GridOverlay } from '../renderer/GridOverlay';
+import { CrosshairOverlay } from '../renderer/CrosshairOverlay';
 import { SharedRingBuffer } from '../core/SharedRingBuffer';
 
 /**
@@ -47,6 +48,7 @@ export class ErosChart {
     private canvas: HTMLCanvasElement;
     private renderer: WebGPURenderer | null = null;
     private gridOverlay: GridOverlay | null = null;
+    private crosshairOverlay: CrosshairOverlay | null = null;
     private ringBuffer: SharedRingBuffer | null = null;
     private worker: Worker | null = null;
 
@@ -116,6 +118,13 @@ export class ErosChart {
 
         // ========== GRID OVERLAY ==========
         this.gridOverlay = new GridOverlay(this.canvas);
+
+        // ========== CROSSHAIR OVERLAY ==========
+        this.crosshairOverlay = new CrosshairOverlay(
+            this.canvas,
+            this.ringBuffer,
+            this.options.sampleRate
+        );
 
         // ========== WEB WORKER ==========
         // Worker holt gRPC Daten im Hintergrund
@@ -193,6 +202,17 @@ export class ErosChart {
         this.viewportStart = startIndex;
         this.viewportEnd = endIndex;
         this.renderer?.setViewport(startIndex, endIndex);
+
+        // Update Crosshair Viewport
+        if (this.renderer && this.crosshairOverlay) {
+            const viewport = this.renderer.getViewport();
+            this.crosshairOverlay.updateViewport(
+                startIndex,
+                endIndex,
+                viewport.minValue,
+                viewport.maxValue
+            );
+        }
     }
 
     /**
@@ -284,6 +304,17 @@ export class ErosChart {
             }
 
             this.renderer!.setViewport(this.viewportStart, this.viewportEnd);
+
+            // Update Crosshair Viewport
+            if (this.crosshairOverlay) {
+                const viewport = this.renderer!.getViewport();
+                this.crosshairOverlay.updateViewport(
+                    this.viewportStart,
+                    this.viewportEnd,
+                    viewport.minValue,
+                    viewport.maxValue
+                );
+            }
         }, { passive: false });
 
         // ========== PAN (Drag) ==========
@@ -318,6 +349,17 @@ export class ErosChart {
             }
 
             this.renderer!.setViewport(this.viewportStart, this.viewportEnd);
+
+            // Update Crosshair Viewport
+            if (this.crosshairOverlay) {
+                const viewport = this.renderer!.getViewport();
+                this.crosshairOverlay.updateViewport(
+                    this.viewportStart,
+                    this.viewportEnd,
+                    viewport.minValue,
+                    viewport.maxValue
+                );
+            }
         });
 
         window.addEventListener('mouseup', () => {
@@ -339,6 +381,7 @@ export class ErosChart {
 
             this.renderer?.resize(w, h);
             this.gridOverlay?.resize(w, h);
+            this.crosshairOverlay?.resize();
         });
     }
 

@@ -11,4 +11,5 @@ export type { ErosChartOptions, StreamOptions } from './api/ErosChart';
 // === Advanced Components (falls jemand direkt darauf zugreifen will) ===
 export { WebGPURenderer } from './renderer/WebGPURenderer';
 export { GridOverlay } from './renderer/GridOverlay';
+export { CrosshairOverlay } from './renderer/CrosshairOverlay';
 export { SharedRingBuffer } from './core/SharedRingBuffer';
