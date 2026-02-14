@@ -129,6 +129,7 @@ export class CrosshairOverlay {
         const rect = this.parentCanvas.getBoundingClientRect();
         this.mouseX = event.clientX - rect.left;
         this.mouseY = event.clientY - rect.top;
+        console.log(`Crosshair: mouseX=${this.mouseX}, mouseY=${this.mouseY}`);
         this.draw();  // Redraw mit neuer Position
     }
 
@@ -149,12 +150,15 @@ export class CrosshairOverlay {
 
         // Nur zeichnen wenn Maus innerhalb Canvas
         if (this.mouseX < 0 || this.mouseY < 0) {
+            console.log('Crosshair: Mouse outside canvas');
             return;
         }
 
         const ctx = this.ctx;
         const width = this.canvas.width;
         const height = this.canvas.height;
+
+        console.log(`Crosshair: Drawing at ${this.mouseX},${this.mouseY} on canvas ${width}x${height}`);
 
         // ========== Werte berechnen ==========
         const timeValue = this.getTimeAtX(this.mouseX);
