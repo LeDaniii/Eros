@@ -246,9 +246,14 @@ export class CrosshairOverlay {
         const indexFloor = Math.floor(sampleIndex);
         const indexCeil = Math.ceil(sampleIndex);
 
-        // Samples aus Buffer lesen
-        const valueFloor = this.buffer.get(indexFloor);
-        const valueCeil = this.buffer.get(indexCeil);
+        // Bounds check
+        if (indexFloor < 0 || indexCeil >= this.buffer.data.length) {
+            return 0;
+        }
+
+        // Samples aus Buffer lesen (direkt auf data[] zugreifen!)
+        const valueFloor = this.buffer.data[indexFloor];
+        const valueCeil = this.buffer.data[indexCeil];
 
         // Linear interpolieren
         const fraction = sampleIndex - indexFloor;
