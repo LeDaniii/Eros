@@ -142,7 +142,7 @@ export class CrosshairOverlay {
     }
 
     /**
-     * Crosshair zeichnen (MIT SNAPPING!)
+     * Crosshair zeichnen
      */
     public draw(): void {
         this.clear();
@@ -156,51 +156,25 @@ export class CrosshairOverlay {
         const width = this.canvas.width;
         const height = this.canvas.height;
 
-        // ========== SNAPPING: Finde nächsten Datenpunkt ==========
-        const snapIndex = this.getSnapIndexAtX(this.mouseX);
+        // ========== Werte berechnen ==========
+        const timeValue = this.getTimeAtX(this.mouseX);
+        const yValue = this.getYValueAtX(this.mouseX);
 
-        // Sicherheitscheck: Index muss gültig sein
-        if (snapIndex < 0 || snapIndex >= this.buffer.data.length) {
-            return;
-        }
-
-        const snapX = this.getXForIndex(snapIndex);  // X-Position vom Datenpunkt
-        const yValue = this.getYValueAtIndex(snapIndex);  // Exakter Y-Wert
-        const timeValue = this.getTimeAtIndex(snapIndex);  // Exakte Zeit
-
-        // Sicherheitscheck: Werte müssen gültig sein
-        if (!isFinite(snapX) || !isFinite(yValue) || !isFinite(timeValue)) {
-            return;
-        }
-
-        // Y-Position vom Datenpunkt berechnen (wie im Shader!)
-        const valueRange = this.viewport.maxValue - this.viewport.minValue;
-        if (valueRange === 0) return;  // Division durch 0 vermeiden
-
-        const normalizedY = (yValue - this.viewport.minValue) / valueRange;  // 0.0 bis 1.0
-        const snapY = height - (normalizedY * height);  // Canvas Y ist invertiert (0 = oben)
-
-        // ========== Crosshair Linien zeichnen (an Datenpunkt-Position!) ==========
+        // ========== Crosshair Linien zeichnen ==========
         ctx.strokeStyle = this.lineColor;
         ctx.lineWidth = this.lineWidth;
         ctx.setLineDash([5, 5]);  // Gestrichelte Linie (5px an, 5px aus)
 
         ctx.beginPath();
-        // Vertikale Linie (an snapX statt mouseX!)
-        ctx.moveTo(snapX, 0);
-        ctx.lineTo(snapX, height);
-        // Horizontale Linie (an snapY statt mouseY!)
-        ctx.moveTo(0, snapY);
-        ctx.lineTo(width, snapY);
+        // Vertikale Linie
+        ctx.moveTo(this.mouseX, 0);
+        ctx.lineTo(this.mouseX, height);
+        // Horizontale Linie
+        ctx.moveTo(0, this.mouseY);
+        ctx.lineTo(width, this.mouseY);
         ctx.stroke();
 
         ctx.setLineDash([]);  // Reset zu durchgezogener Linie
-
-        // ========== Datenpunkt-Marker (kleiner Kreis) ==========
-        ctx.fillStyle = this.lineColor;
-        ctx.beginPath();
-        ctx.arc(snapX, snapY, 4, 0, 2 * Math.PI);  // Kreis mit Radius 4px
-        ctx.fill();
 
         // ========== Text zeichnen ==========
         ctx.fillStyle = this.textColor;
@@ -209,7 +183,7 @@ export class CrosshairOverlay {
         // Zeit-Text (oben rechts an vertikaler Linie)
         const timeText = `t: ${timeValue.toFixed(4)}s`;
         const timeMetrics = ctx.measureText(timeText);
-        const timeX = snapX + 8;  // 8px Abstand von Linie
+        const timeX = this.mouseX + 8;  // 8px Abstand von Linie
         const timeY = 15;
 
         // Hintergrund für bessere Lesbarkeit
@@ -220,7 +194,7 @@ export class CrosshairOverlay {
         const yText = `y: ${yValue.toFixed(3)}`;
         const yMetrics = ctx.measureText(yText);
         const yX = 8;
-        const yY = snapY - 5;
+        const yY = this.mouseY - 5;
 
         this.drawTextBackground(ctx, yX, yY, yMetrics.width, this.fontSize);
         ctx.fillText(yText, yX, yY);
@@ -242,51 +216,39 @@ export class CrosshairOverlay {
     }
 
     /**
-     * Finde nächsten Sample-Index für X-Position (SNAPPING!)
-     *
-     * WIE funktioniert's?
-     * - X-Position → Sample Index (float)
-     * - Runde auf nächsten ganzzahligen Index (= Snap!)
-     * - Rückgabe: Exakter Sample-Index
+     * Berechne Zeit (in Sekunden) für X-Position
      */
-    private getSnapIndexAtX(x: number): number {
+    private getTimeAtX(x: number): number {
         const width = this.canvas.width;
         const progress = x / width;  // 0.0 bis 1.0
 
         const sampleIndex = this.viewport.startIndex +
             progress * (this.viewport.endIndex - this.viewport.startIndex);
 
-        // SNAP: Runde auf nächsten ganzzahligen Sample-Index
-        return Math.round(sampleIndex);
+        return sampleIndex / this.sampleRate;
     }
 
     /**
-     * Berechne Zeit (in Sekunden) für Sample-Index
+     * Berechne Y-Wert für X-Position
      */
-    private getTimeAtIndex(index: number): number {
-        return index / this.sampleRate;
-    }
-
-    /**
-     * Berechne Y-Wert für Sample-Index (KEIN Interpolieren!)
-     */
-    private getYValueAtIndex(index: number): number {
-        // Lese exakten Wert aus Buffer (kein Interpolieren!)
-        return this.buffer.get(index);
-    }
-
-    /**
-     * Berechne X-Position für Sample-Index (für Crosshair-Linie)
-     *
-     * WIE funktioniert's?
-     * - Sample Index → Progress im Viewport
-     * - Progress → X-Pixel Position
-     */
-    private getXForIndex(index: number): number {
+    private getYValueAtX(x: number): number {
         const width = this.canvas.width;
-        const progress = (index - this.viewport.startIndex) /
-            (this.viewport.endIndex - this.viewport.startIndex);
-        return progress * width;
+        const progress = x / width;
+
+        const sampleIndex = this.viewport.startIndex +
+            progress * (this.viewport.endIndex - this.viewport.startIndex);
+
+        // Sample Index abrunden/aufrunden für Interpolation
+        const indexFloor = Math.floor(sampleIndex);
+        const indexCeil = Math.ceil(sampleIndex);
+
+        // Samples aus Buffer lesen
+        const valueFloor = this.buffer.get(indexFloor);
+        const valueCeil = this.buffer.get(indexCeil);
+
+        // Linear interpolieren
+        const fraction = sampleIndex - indexFloor;
+        return valueFloor + (valueCeil - valueFloor) * fraction;
     }
 
     /**
