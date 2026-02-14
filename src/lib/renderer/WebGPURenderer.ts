@@ -59,11 +59,45 @@ export class WebGPURenderer {
     // Manueller Zoom/Pan Override (null = zeige alles)
     private viewportOverride: { start: number; end: number } | null = null;
 
+    // === Line Color ===
+    private lineColor: [number, number, number, number] = [0.0, 1.0, 0.0, 1.0]; // Default: Grün (RGBA)
+
     constructor(private canvas: HTMLCanvasElement) { }
 
     public setDataSource(rb: SharedRingBuffer) {
         this.ringBuffer = rb;
         this.createGPUResources();
+    }
+
+    /**
+     * Setzt die Linienfarbe
+     * @param hexColor - Farbe als Hex-String (z.B. '#00ff00' für Grün)
+     */
+    public setLineColor(hexColor: string) {
+        this.lineColor = this.hexToRGBA(hexColor);
+    }
+
+    /**
+     * Konvertiert Hex-Farbe zu RGBA (für GPU Shader)
+     * @param hex - Hex-String wie '#00ff00' oder '#0f0'
+     * @returns RGBA Array [r, g, b, a] mit Werten 0.0-1.0
+     */
+    private hexToRGBA(hex: string): [number, number, number, number] {
+        // Entferne '#' falls vorhanden
+        hex = hex.replace('#', '');
+
+        // Kurze Form (#RGB) zu langer Form (#RRGGBB) expandieren
+        if (hex.length === 3) {
+            hex = hex.split('').map(c => c + c).join('');
+        }
+
+        // Parse Hex zu RGB (0-255)
+        const r = parseInt(hex.substring(0, 2), 16);
+        const g = parseInt(hex.substring(2, 4), 16);
+        const b = parseInt(hex.substring(4, 6), 16);
+
+        // Konvertiere zu 0.0-1.0 (GPU braucht das so)
+        return [r / 255, g / 255, b / 255, 1.0];
     }
 
     // NEU: Viewport setzen
@@ -87,8 +121,10 @@ export class WebGPURenderer {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
 
+        // Uniform Buffer: 6 floats (24 bytes) + 8 bytes padding + 4 floats für Farbe (16 bytes) = 48 bytes
+        // WICHTIG: vec4<f32> muss an 16-Byte Grenzen aligned sein!
         this.uniformBuffer = this.device.createBuffer({
-            size: 24,
+            size: 48,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
 
@@ -220,13 +256,14 @@ export class WebGPURenderer {
         // ============================================
 
         // Uniforms = Daten die für ALLE Vertices gleich sind
-        // (Viewport, Zoom-Level, etc.)
+        // (Viewport, Zoom-Level, Farbe, etc.)
         struct Uniforms {
             resolution: vec2<f32>,  // Canvas-Größe (width, height)
             minValue: f32,          // Y-Achse Minimum (für Scaling)
             maxValue: f32,          // Y-Achse Maximum (für Scaling)
             startIndex: f32,        // Erster sichtbarer Sample (Zoom)
             endIndex: f32,          // Letzter sichtbarer Sample (Zoom)
+            lineColor: vec4<f32>,   // Linienfarbe (RGBA)
         }
 
         // Binding 0: Die Messdaten (SharedArrayBuffer Daten!)
@@ -275,8 +312,8 @@ export class WebGPURenderer {
             // Setze Position (vec4 weil GPU will x,y,z,w - w=1.0 ist Standard)
             out.position = vec4<f32>(x, y, 0.0, 1.0);
 
-            // Setze Farbe (RGBA: Grün = 0,1,0,1)
-            out.color = vec4<f32>(0.0, 1.0, 0.0, 1.0);
+            // Setze Farbe (aus Uniforms statt hardcoded!)
+            out.color = uniforms.lineColor;
 
             return out;
         }
@@ -373,12 +410,17 @@ export class WebGPURenderer {
         // ========== UNIFORMS UPDATEN ==========
         // Diese Daten gehen an den Shader (siehe Uniforms struct im WGSL Code!)
         const uniformData = new Float32Array([
-            this.canvas.width,           // resolution.x
-            this.canvas.height,          // resolution.y
-            this.viewport.minValue,      // minValue (Y-Achse unten)
-            this.viewport.maxValue,      // maxValue (Y-Achse oben)
-            this.viewport.startIndex,    // startIndex (Zoom Start)
-            this.viewport.endIndex,      // endIndex (Zoom Ende)
+            this.canvas.width,           // Offset 0:  resolution.x
+            this.canvas.height,          // Offset 4:  resolution.y
+            this.viewport.minValue,      // Offset 8:  minValue (Y-Achse unten)
+            this.viewport.maxValue,      // Offset 12: maxValue (Y-Achse oben)
+            this.viewport.startIndex,    // Offset 16: startIndex (Zoom Start)
+            this.viewport.endIndex,      // Offset 20: endIndex (Zoom Ende)
+            0, 0,                        // Offset 24/28: PADDING (8 bytes) für Alignment!
+            this.lineColor[0],           // Offset 32: lineColor.r
+            this.lineColor[1],           // Offset 36: lineColor.g
+            this.lineColor[2],           // Offset 40: lineColor.b
+            this.lineColor[3],           // Offset 44: lineColor.a
         ]);
         this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
 

@@ -48,7 +48,8 @@ import { ErosChart } from './lib/api/ErosChart';
 const chart = new ErosChart('#plotCanvas', {
   grpcUrl: 'http://localhost:50051',
   bufferSize: 100_000,   // 10 Sekunden @ 10kHz
-  sampleRate: 10_000     // 10kHz
+  sampleRate: 10_000,    // 10kHz
+  lineColor: '#00ff00'   // Optional: Linienfarbe (default: grün)
 });
 
 // Initialisieren

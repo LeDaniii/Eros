@@ -136,7 +136,9 @@ function setupButtonHandlers() {
             chart = new ErosChart('#plotCanvas', {
                 grpcUrl: 'http://localhost:50051',
                 bufferSize: bufferSize,
-                sampleRate: sampleRate
+                sampleRate: sampleRate,
+                lineColor: '#0080ff'  // Optional: Linienfarbe (default: grün)
+                // Andere Beispiele: '#ff0000' (rot), '#0080ff' (blau), '#ffff00' (gelb)
             });
 
             await chart.initialize();

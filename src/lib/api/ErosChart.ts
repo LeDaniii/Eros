@@ -32,6 +32,7 @@ export interface ErosChartOptions {
     grpcUrl: string;        // gRPC Server URL (z.B. 'http://localhost:50051')
     bufferSize?: number;    // Wie viele Samples im Buffer? (default: 100_000)
     sampleRate?: number;    // Samples pro Sekunde (default: 10_000 = 10kHz)
+    lineColor?: string;     // Linienfarbe als Hex (z.B. '#00ff00', default: grün)
 }
 
 /**
@@ -83,6 +84,7 @@ export class ErosChart {
             grpcUrl: options.grpcUrl,
             bufferSize: options.bufferSize ?? 100_000,  // 10 Sekunden @ 10kHz
             sampleRate: options.sampleRate ?? 10_000,   // 10kHz
+            lineColor: options.lineColor ?? '#00ff00',  // Grün als Default
         };
     }
 
@@ -110,6 +112,7 @@ export class ErosChart {
         this.renderer = new WebGPURenderer(this.canvas);
         await this.renderer.initialize();
         this.renderer.setDataSource(this.ringBuffer);
+        this.renderer.setLineColor(this.options.lineColor);  // Setze Linienfarbe
 
         // ========== GRID OVERLAY ==========
         this.gridOverlay = new GridOverlay(this.canvas);
