@@ -158,12 +158,25 @@ export class CrosshairOverlay {
 
         // ========== SNAPPING: Finde nächsten Datenpunkt ==========
         const snapIndex = this.getSnapIndexAtX(this.mouseX);
+
+        // Sicherheitscheck: Index muss gültig sein
+        if (snapIndex < 0 || snapIndex >= this.buffer.data.length) {
+            return;
+        }
+
         const snapX = this.getXForIndex(snapIndex);  // X-Position vom Datenpunkt
         const yValue = this.getYValueAtIndex(snapIndex);  // Exakter Y-Wert
         const timeValue = this.getTimeAtIndex(snapIndex);  // Exakte Zeit
 
+        // Sicherheitscheck: Werte müssen gültig sein
+        if (!isFinite(snapX) || !isFinite(yValue) || !isFinite(timeValue)) {
+            return;
+        }
+
         // Y-Position vom Datenpunkt berechnen (wie im Shader!)
         const valueRange = this.viewport.maxValue - this.viewport.minValue;
+        if (valueRange === 0) return;  // Division durch 0 vermeiden
+
         const normalizedY = (yValue - this.viewport.minValue) / valueRange;  // 0.0 bis 1.0
         const snapY = height - (normalizedY * height);  // Canvas Y ist invertiert (0 = oben)
 
