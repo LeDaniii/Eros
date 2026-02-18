@@ -19,9 +19,14 @@
  * Performance-Trick: line-strip Topology
  * - Statt jeden Punkt einzeln: Verbinde Punkte als Linie
  * - 100.000 Punkte = 99.999 Linien (GPU macht das automatisch!)
+ *
+ * ADAPTIVE DOWNSAMPLING:
+ * - Rausgezoomt (>4 Punkte/Pixel): Min/Max pro Pixel-Bucket → ~4000 Vertices
+ * - Reingezoomt (≤4 Punkte/Pixel): Exakte Daten → Point-Snapping möglich
  */
 
 import { SharedRingBuffer } from "../core/SharedRingBuffer";
+import { Downsampler, DownsampleResult } from "../core/Downsampler";
 
 interface Viewport {
     minValue: number;    // Y-Achse Minimum (für Auto-Scaling)
@@ -37,30 +42,36 @@ export class WebGPURenderer {
     private pipeline: GPURenderPipeline | null = null; // Shader-Pipeline (Vertex + Fragment Shader)
 
     // === GPU Memory Buffers ===
-    private dataBuffer: GPUBuffer | null = null;     // Enthält die Messwerte (Float32Array)
-    private uniformBuffer: GPUBuffer | null = null;  // Enthält Viewport-Infos (Zoom, Min/Max)
+    private dataBuffer: GPUBuffer | null = null;           // Voller Ring-Buffer für Exact Mode
+    private downsampledBuffer: GPUBuffer | null = null;    // Kleiner Buffer für Downsampled Mode
+    private uniformBuffer: GPUBuffer | null = null;        // Viewport-Infos (Zoom, Min/Max, Mode)
 
     // === Rendering Resources ===
-    private bindGroup: GPUBindGroup | null = null;   // Verbindet Shader mit Buffern
-    private msaaTexture: GPUTexture | null = null;   // Für Anti-Aliasing
-    private readonly sampleCount = 4;                 // 4x MSAA (Multi-Sample Anti-Aliasing)
+    private bindGroup: GPUBindGroup | null = null;              // Exact Mode: voller Buffer
+    private downsampledBindGroup: GPUBindGroup | null = null;   // Downsampled Mode: kleiner Buffer
+    private msaaTexture: GPUTexture | null = null;              // Für Anti-Aliasing
+    private readonly sampleCount = 4;                            // 4x MSAA
 
     // === Data Source ===
     private ringBuffer: SharedRingBuffer | null = null;
 
+    // === Downsampling ===
+    private downsampler: Downsampler | null = null;
+    private lastDownsampleResult: DownsampleResult | null = null;
+
     // === Viewport State ===
     private viewport: Viewport = {
-        minValue: -2.5,   // Y-Achse unten (wird automatisch berechnet)
-        maxValue: 2.5,    // Y-Achse oben (wird automatisch berechnet)
-        startIndex: 0,    // Erster sichtbarer Datenpunkt
-        endIndex: 0       // Letzter sichtbarer Datenpunkt
+        minValue: -2.5,
+        maxValue: 2.5,
+        startIndex: 0,
+        endIndex: 0
     };
 
     // Manueller Zoom/Pan Override (null = zeige alles)
     private viewportOverride: { start: number; end: number } | null = null;
 
     // === Line Color ===
-    private lineColor: [number, number, number, number] = [0.0, 1.0, 0.0, 1.0]; // Default: Grün (RGBA)
+    private lineColor: [number, number, number, number] = [0.0, 1.0, 0.0, 1.0];
 
     constructor(private canvas: HTMLCanvasElement) { }
 
@@ -69,38 +80,21 @@ export class WebGPURenderer {
         this.createGPUResources();
     }
 
-    /**
-     * Setzt die Linienfarbe
-     * @param hexColor - Farbe als Hex-String (z.B. '#00ff00' für Grün)
-     */
     public setLineColor(hexColor: string) {
         this.lineColor = this.hexToRGBA(hexColor);
     }
 
-    /**
-     * Konvertiert Hex-Farbe zu RGBA (für GPU Shader)
-     * @param hex - Hex-String wie '#00ff00' oder '#0f0'
-     * @returns RGBA Array [r, g, b, a] mit Werten 0.0-1.0
-     */
     private hexToRGBA(hex: string): [number, number, number, number] {
-        // Entferne '#' falls vorhanden
         hex = hex.replace('#', '');
-
-        // Kurze Form (#RGB) zu langer Form (#RRGGBB) expandieren
         if (hex.length === 3) {
             hex = hex.split('').map(c => c + c).join('');
         }
-
-        // Parse Hex zu RGB (0-255)
         const r = parseInt(hex.substring(0, 2), 16);
         const g = parseInt(hex.substring(2, 4), 16);
         const b = parseInt(hex.substring(4, 6), 16);
-
-        // Konvertiere zu 0.0-1.0 (GPU braucht das so)
         return [r / 255, g / 255, b / 255, 1.0];
     }
 
-    // NEU: Viewport setzen
     public setViewport(startIndex: number, endIndex: number) {
         this.viewportOverride = {
             start: Math.floor(startIndex),
@@ -108,31 +102,44 @@ export class WebGPURenderer {
         };
     }
 
-    // NEU: Viewport zurücksetzen
     public resetViewport() {
         this.viewportOverride = null;
     }
 
-    // NEU: Viewport abfragen (für Crosshair)
     public getViewport(): Viewport {
         return { ...this.viewport };
+    }
+
+    /** Returns the last downsample result (includes globalMin/globalMax) */
+    public getLastDownsampleResult(): DownsampleResult | null {
+        return this.lastDownsampleResult;
     }
 
     private createGPUResources() {
         if (!this.device || !this.ringBuffer) return;
 
+        // Voller Buffer für Exact Mode
         this.dataBuffer = this.device.createBuffer({
             size: this.ringBuffer.data.byteLength,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
 
-        // Uniform Buffer: 6 floats (24 bytes) + 8 bytes padding + 4 floats für Farbe (16 bytes) = 48 bytes
-        // WICHTIG: vec4<f32> muss an 16-Byte Grenzen aligned sein!
+        // Kleiner Buffer für Downsampled Mode (2 floats pro Pixel)
+        const maxDownsampledSize = this.canvas.width * 2 * 4;
+        this.downsampledBuffer = this.device.createBuffer({
+            size: Math.max(maxDownsampledSize, 256),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+
+        // Uniform Buffer: 12 floats = 48 bytes
+        // resolution(2f) + minValue(1f) + maxValue(1f) + startIndex(1f) + endIndex(1f)
+        // + mode(1f) + vertexCount(1f) + lineColor(4f)
         this.uniformBuffer = this.device.createBuffer({
             size: 48,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
 
+        // Bind Group für Exact Mode (voller dataBuffer)
         this.bindGroup = this.device.createBindGroup({
             layout: this.pipeline!.getBindGroupLayout(0),
             entries: [
@@ -140,48 +147,39 @@ export class WebGPURenderer {
                 { binding: 1, resource: { buffer: this.uniformBuffer } }
             ]
         });
+
+        // Bind Group für Downsampled Mode (kleiner Buffer)
+        this.downsampledBindGroup = this.device.createBindGroup({
+            layout: this.pipeline!.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this.downsampledBuffer } },
+                { binding: 1, resource: { buffer: this.uniformBuffer } }
+            ]
+        });
+
+        // Downsampler initialisieren
+        this.downsampler = new Downsampler(this.canvas.width);
     }
 
-    /**
-     * Initialisiert WebGPU
-     *
-     * WAS passiert hier?
-     * 1. Fordert GPU-Zugriff an (requestAdapter)
-     * 2. Erstellt ein logisches GPU-Gerät (requestDevice)
-     * 3. Verbindet GPU mit Canvas (context)
-     * 4. Kompiliert Shader (setupPipeline)
-     * 5. Erstellt MSAA Texture (Anti-Aliasing)
-     *
-     * WARUM 'high-performance'?
-     * - Laptop haben oft 2 GPUs: Integriert (stromsparend) + Dediziert (schnell)
-     * - Wir wollen die schnelle GPU für viele Datenpunkte!
-     */
     async initialize() {
-        // Fordere GPU-Adapter an (wie: "Gib mir Zugriff auf die Grafikkarte")
         const adapter = await navigator.gpu?.requestAdapter({
-            powerPreference: 'high-performance'  // Wähle die schnellste GPU
+            powerPreference: 'high-performance'
         });
 
         if (!adapter) throw new Error("WebGPU nicht unterstützt (braucht Chrome/Edge 113+)");
 
-        // Erstelle logisches GPU-Gerät (unser Interface zur Hardware)
         this.device = await adapter.requestDevice();
 
-        // Hole WebGPU Context vom Canvas (wie getContext('2d'), aber für GPU)
         this.context = this.canvas.getContext('webgpu');
         if (!this.context) throw new Error("WebGPU Context failed");
 
-        // Konfiguriere Canvas für GPU-Rendering
         this.context.configure({
             device: this.device,
-            format: navigator.gpu.getPreferredCanvasFormat(),  // Meist 'bgra8unorm'
-            alphaMode: 'premultiplied',  // Für transparente Überlagerungen
+            format: navigator.gpu.getPreferredCanvasFormat(),
+            alphaMode: 'premultiplied',
         });
 
-        // Kompiliere Shader und erstelle Render-Pipeline
         await this.setupPipeline();
-
-        // Erstelle Texture für Anti-Aliasing
         this.createMSAATexture();
     }
 
@@ -238,241 +236,199 @@ export class WebGPURenderer {
     }
 
     /**
-     * WGSL Shader Code - Das Herz des Renderers!
+     * WGSL Shader Code - Dual-Mode (Exact + Downsampled)
      *
-     * WAS ist ein Shader?
-     * - Ein Mini-Programm das auf der GPU läuft
-     * - Wird PARALLEL für alle Punkte ausgeführt (darum so schnell!)
-     * - Geschrieben in WGSL (WebGPU Shading Language)
+     * EXACT MODE (mode < 0.5):
+     * - Daten liegen im vollen Ring-Buffer
+     * - Index: startIndex + vertex_index
+     * - X-Position: vertex_index / visibleCount
      *
-     * ZWEI Arten von Shadern:
-     * 1. VERTEX SHADER: Berechnet Position jedes Punktes (X/Y Koordinaten)
-     * 2. FRAGMENT SHADER: Malt die Pixel (Farbe)
-     *
-     * GPU Koordinatensystem:
-     * - X: -1 (links) bis +1 (rechts)
-     * - Y: -1 (unten) bis +1 (oben)
-     * - Z: 0 (vorne) bis 1 (hinten) - brauchen wir nicht für 2D
+     * DOWNSAMPLED MODE (mode >= 0.5):
+     * - Daten liegen im kompakten Buffer [min0, max0, min1, max1, ...]
+     * - Index: vertex_index (direkt, da Buffer schon kompakt)
+     * - X-Position: floor(vertex_index / 2) / bucketCount (Min+Max teilen sich X)
      */
     private getWGSLCode(): string {
         return `
-        // ============================================
-        // DATEN-STRUKTUREN (wie TypeScript Interfaces)
-        // ============================================
-
-        // Uniforms = Daten die für ALLE Vertices gleich sind
-        // (Viewport, Zoom-Level, Farbe, etc.)
         struct Uniforms {
             resolution: vec2<f32>,  // Canvas-Größe (width, height)
             minValue: f32,          // Y-Achse Minimum (für Scaling)
             maxValue: f32,          // Y-Achse Maximum (für Scaling)
-            startIndex: f32,        // Erster sichtbarer Sample (Zoom)
-            endIndex: f32,          // Letzter sichtbarer Sample (Zoom)
+            startIndex: f32,        // Erster sichtbarer Sample (Exact Mode)
+            endIndex: f32,          // Letzter sichtbarer Sample (Exact Mode)
+            mode: f32,              // 0.0 = exact, 1.0 = downsampled
+            vertexCount: f32,       // Anzahl Vertices (für Downsampled X-Berechnung)
             lineColor: vec4<f32>,   // Linienfarbe (RGBA)
         }
 
-        // Binding 0: Die Messdaten (SharedArrayBuffer Daten!)
-        // storage = Großer Speicher (kann Millionen Floats enthalten)
-        // read = Shader liest nur, schreibt nicht
         @group(0) @binding(0) var<storage, read> data: array<f32>;
-
-        // Binding 1: Die Uniform-Daten (Viewport Info)
-        // uniform = Kleiner Speicher, aber ultra-schneller Zugriff
         @group(0) @binding(1) var<uniform> uniforms: Uniforms;
 
-        // Output des Vertex-Shaders (geht zum Fragment-Shader)
         struct VertexOutput {
-            @builtin(position) position: vec4<f32>,  // Wo ist der Punkt?
-            @location(0) color: vec4<f32>,           // Welche Farbe?
+            @builtin(position) position: vec4<f32>,
+            @location(0) color: vec4<f32>,
         };
 
-        // ============================================
-        // VERTEX SHADER - Läuft für JEDEN Datenpunkt
-        // ============================================
         @vertex
         fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
             var out: VertexOutput;
 
-            // WICHTIG: idx ist relativ (0, 1, 2, ...)
-            // Aber wir zeigen vielleicht nur Samples 5000-10000 (Zoom!)
-            // → Wir müssen startIndex addieren!
-            let actualIndex = u32(uniforms.startIndex) + idx;
-            let val = data[actualIndex];  // Holt den Messwert aus dem Buffer
+            // Daten-Index: In Exact Mode offset by startIndex, in Downsampled direkt
+            let dataIndex = select(u32(uniforms.startIndex) + idx, idx, uniforms.mode > 0.5);
+            let val = data[dataIndex];
 
-            // Wie viele Samples sind sichtbar? (für X-Achsen Berechnung)
-            let visibleCount = uniforms.endIndex - uniforms.startIndex;
+            var x: f32;
 
-            // ========== X-POSITION BERECHNEN ==========
-            // idx geht von 0 bis visibleCount
-            // Wir wollen: 0 → -1 (links), visibleCount → +1 (rechts)
-            let normalizedX = f32(idx) / visibleCount;  // 0.0 bis 1.0
-            let x = normalizedX * 2.0 - 1.0;            // -1.0 bis +1.0
+            if (uniforms.mode < 0.5) {
+                // === EXACT MODE ===
+                let visibleCount = uniforms.endIndex - uniforms.startIndex;
+                let normalizedX = f32(idx) / visibleCount;
+                x = normalizedX * 2.0 - 1.0;
+            } else {
+                // === DOWNSAMPLED MODE ===
+                // [min0, max0, min1, max1, ...] → Min+Max teilen sich X-Position
+                let bucketCount = uniforms.vertexCount / 2.0;
+                let bucketIndex = f32(idx / 2u);
+                let normalizedX = (bucketIndex + 0.5) / bucketCount;
+                x = normalizedX * 2.0 - 1.0;
+            }
 
-            // ========== Y-POSITION BERECHNEN ==========
-            // Auto-Scaling: Messwerte passen sich an Min/Max an
+            // Y-Position: gleich für beide Modi (Auto-Scaling)
             let valueRange = uniforms.maxValue - uniforms.minValue;
-            let normalizedY = (val - uniforms.minValue) / valueRange;  // 0.0 bis 1.0
-            let y = (normalizedY * 2.0 - 1.0) * 0.95;  // -0.95 bis +0.95 (5% Padding)
+            let normalizedY = (val - uniforms.minValue) / valueRange;
+            let y = (normalizedY * 2.0 - 1.0) * 0.95;
 
-            // Setze Position (vec4 weil GPU will x,y,z,w - w=1.0 ist Standard)
             out.position = vec4<f32>(x, y, 0.0, 1.0);
-
-            // Setze Farbe (aus Uniforms statt hardcoded!)
             out.color = uniforms.lineColor;
 
             return out;
         }
 
-        // ============================================
-        // FRAGMENT SHADER - Malt die Pixel
-        // ============================================
-        // Dieser Shader ist trivial: Nimm die Farbe vom Vertex Shader
         @fragment
         fn fs_main(@location(0) color: vec4<f32>) -> @location(0) vec4<f32> {
-            return color;  // Einfach die Farbe zurückgeben (grün)
+            return color;
         }
     `;
     }
 
     /**
-     * Berechnet den Viewport (welcher Bereich ist sichtbar?)
-     *
-     * ZWEI Modi:
-     * 1. Auto-View: Zeige alle Daten (von 0 bis currentHead)
-     * 2. Zoom/Pan: Zeige nur einen Ausschnitt (viewportOverride)
-     *
-     * Auto-Scaling:
-     * - Findet Min/Max der SICHTBAREN Daten
-     * - Y-Achse passt sich automatisch an
-     * - +5% Padding oben/unten (sieht besser aus)
+     * Berechnet den sichtbaren Bereich (Viewport).
+     * Min/Max wird NICHT mehr hier berechnet — das macht der Downsampler als Nebenprodukt.
      */
     private updateViewport() {
         if (!this.ringBuffer) return;
 
         const currentHead = this.ringBuffer.currentHead;
 
-        // ========== BEREICH FESTLEGEN ==========
         if (this.viewportOverride) {
-            // User hat gezoomt/gepannt → Zeige nur den gewählten Bereich
             this.viewport.startIndex = Math.max(0, this.viewportOverride.start);
             this.viewport.endIndex = Math.min(currentHead, this.viewportOverride.end);
         } else {
-            // Kein Zoom → Zeige alles von Anfang bis jetzt
             this.viewport.startIndex = 0;
             this.viewport.endIndex = Math.max(currentHead, 1);
         }
-
-        // ========== AUTO-SCALING (Y-Achse) ==========
-        // Finde Min/Max über SICHTBARE Daten (nicht alle!)
-        let min = Infinity;
-        let max = -Infinity;
-
-        for (let i = this.viewport.startIndex; i < this.viewport.endIndex; i++) {
-            const val = this.ringBuffer.data[i];
-            if (val < min) min = val;
-            if (val > max) max = val;
-        }
-
-        // Fallback falls keine Daten vorhanden
-        if (min === Infinity) min = -2.5;
-        if (max === -Infinity) max = 2.5;
-
-        // 5% Padding oben/unten (sonst klebt Kurve am Rand)
-        const range = max - min;
-        const padding = range * 0.05;
-        this.viewport.minValue = min - padding;
-        this.viewport.maxValue = max + padding;
     }
 
     /**
-     * Rendert einen Frame (wird 60x pro Sekunde aufgerufen!)
+     * Rendert einen Frame
      *
-     * ABLAUF:
-     * 1. Viewport berechnen (welcher Bereich ist sichtbar?)
-     * 2. Uniforms updaten (Viewport-Info an GPU schicken)
-     * 3. Daten updaten (SharedArrayBuffer → GPU Buffer kopieren)
-     * 4. Render Pass erstellen (GPU-Kommandos aufzeichnen)
-     * 5. Draw Call (GPU: "Mal die Kurve!")
-     * 6. Submit (GPU: "Los, führe die Kommandos aus!")
-     *
-     * WARUM so umständlich?
-     * - GPU arbeitet ASYNCHRON (wir schicken Kommandos, GPU macht sie später)
-     * - CommandEncoder = Liste von Kommandos
-     * - submit() = Schick die Liste an die GPU
+     * ABLAUF mit Downsampling:
+     * 1. Viewport berechnen (welcher Bereich sichtbar?)
+     * 2. Downsampler entscheidet: Exact oder Downsampled?
+     * 3. Je nach Modus: kleinen oder großen Buffer zur GPU uploaden
+     * 4. Shader rendert mit passendem Modus
      */
     public render() {
-        // Sicherheits-Check: Ist alles initialisiert?
         if (!this.device || !this.ringBuffer || !this.dataBuffer ||
             !this.uniformBuffer || !this.pipeline || !this.bindGroup ||
-            !this.context || !this.msaaTexture) return;
+            !this.context || !this.msaaTexture || !this.downsampler ||
+            !this.downsampledBuffer || !this.downsampledBindGroup) return;
 
         const currentHead = this.ringBuffer.currentHead;
-        if (currentHead < 2) return;  // Mindestens 2 Punkte für eine Linie
+        if (currentHead < 2) return;
 
-        // Berechne Viewport (Auto-Scaling, Zoom/Pan)
         this.updateViewport();
 
-        // ========== UNIFORMS UPDATEN ==========
-        // Diese Daten gehen an den Shader (siehe Uniforms struct im WGSL Code!)
+        // === DOWNSAMPLING ENTSCHEIDUNG ===
+        const result = this.downsampler.process(
+            this.ringBuffer.data,
+            this.viewport.startIndex,
+            this.viewport.endIndex,
+            this.canvas.width
+        );
+        this.lastDownsampleResult = result;
+
+        // Min/Max vom Downsampler übernehmen (gratis Nebenprodukt!)
+        const range = result.globalMax - result.globalMin;
+        const padding = range * 0.05;
+        this.viewport.minValue = result.globalMin - padding;
+        this.viewport.maxValue = result.globalMax + padding;
+
+        // === BUFFER + BIND GROUP WÄHLEN ===
+        let activeBindGroup: GPUBindGroup;
+        let drawCount: number;
+        let mode: number;
+
+        if (result.isDownsampled) {
+            // DOWNSAMPLED: Nur kleinen Buffer uploaden (~16KB statt 2.8MB)
+            this.device.queue.writeBuffer(
+                this.downsampledBuffer, 0,
+                result.data.buffer,
+                result.data.byteOffset,
+                result.vertexCount * 4
+            );
+            activeBindGroup = this.downsampledBindGroup;
+            drawCount = result.vertexCount;
+            mode = 1.0;
+        } else {
+            // EXACT: Ring-Buffer uploaden (nur bis currentHead, nicht ganzen Buffer)
+            this.device.queue.writeBuffer(
+                this.dataBuffer, 0,
+                this.ringBuffer.data.buffer,
+                this.ringBuffer.data.byteOffset,
+                currentHead * 4
+            );
+            activeBindGroup = this.bindGroup;
+            drawCount = Math.floor(this.viewport.endIndex - this.viewport.startIndex);
+            mode = 0.0;
+        }
+
+        // === UNIFORMS ===
         const uniformData = new Float32Array([
-            this.canvas.width,           // Offset 0:  resolution.x
-            this.canvas.height,          // Offset 4:  resolution.y
-            this.viewport.minValue,      // Offset 8:  minValue (Y-Achse unten)
-            this.viewport.maxValue,      // Offset 12: maxValue (Y-Achse oben)
-            this.viewport.startIndex,    // Offset 16: startIndex (Zoom Start)
-            this.viewport.endIndex,      // Offset 20: endIndex (Zoom Ende)
-            0, 0,                        // Offset 24/28: PADDING (8 bytes) für Alignment!
-            this.lineColor[0],           // Offset 32: lineColor.r
-            this.lineColor[1],           // Offset 36: lineColor.g
-            this.lineColor[2],           // Offset 40: lineColor.b
-            this.lineColor[3],           // Offset 44: lineColor.a
+            this.canvas.width,           // resolution.x
+            this.canvas.height,          // resolution.y
+            this.viewport.minValue,      // minValue
+            this.viewport.maxValue,      // maxValue
+            this.viewport.startIndex,    // startIndex (Exact Mode)
+            this.viewport.endIndex,      // endIndex (Exact Mode)
+            mode,                        // 0.0 = exact, 1.0 = downsampled
+            result.vertexCount,          // vertexCount (Downsampled Mode)
+            this.lineColor[0],           // lineColor.r
+            this.lineColor[1],           // lineColor.g
+            this.lineColor[2],           // lineColor.b
+            this.lineColor[3],           // lineColor.a
         ]);
         this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
 
-        // ========== DATEN UPDATEN ==========
-        // Kopiere SharedArrayBuffer → GPU Buffer
-        // WICHTIG: Jeder Frame! (Daten ändern sich live)
-        this.device.queue.writeBuffer(
-            this.dataBuffer,                    // Ziel: GPU Buffer
-            0,                                   // Offset im GPU Buffer
-            this.ringBuffer.data.buffer,        // Quelle: SharedArrayBuffer
-            this.ringBuffer.data.byteOffset,    // Offset in Quelle (4 Bytes Header!)
-            this.ringBuffer.data.byteLength     // Wie viele Bytes kopieren?
-        );
-
-        // ========== RENDER PASS ==========
-        // CommandEncoder = "Aufnahme" von GPU-Befehlen
+        // === RENDER PASS ===
         const commandEncoder = this.device.createCommandEncoder();
-
-        // Hole aktuelle Canvas-Texture (wohin wir rendern)
         const currentTexture = this.context.getCurrentTexture();
 
-        // Starte Render Pass (wie: "Öffne Photoshop, neue Ebene")
         const renderPass = commandEncoder.beginRenderPass({
             colorAttachments: [{
-                view: this.msaaTexture.createView(),           // Render in MSAA Texture (4x Auflösung)
-                resolveTarget: currentTexture.createView(),    // Dann downsample ins Canvas
-                clearValue: { r: 0.05, g: 0.05, b: 0.05, a: 1 }, // Hintergrund: Dunkelgrau
-                loadOp: 'clear',   // Lösche vorherigen Frame
-                storeOp: 'store',  // Speichere das Resultat
+                view: this.msaaTexture.createView(),
+                resolveTarget: currentTexture.createView(),
+                clearValue: { r: 0.05, g: 0.05, b: 0.05, a: 1 },
+                loadOp: 'clear',
+                storeOp: 'store',
             }],
         });
 
-        // Setze Pipeline (welche Shader benutzen?)
         renderPass.setPipeline(this.pipeline);
-
-        // Binde Daten (Shader kann jetzt auf dataBuffer + uniformBuffer zugreifen)
-        renderPass.setBindGroup(0, this.bindGroup);
-
-        // ========== DRAW CALL ==========
-        // Sag der GPU: "Male X Vertices als line-strip"
-        const sampleCount = Math.floor(this.viewport.endIndex - this.viewport.startIndex);
-        renderPass.draw(sampleCount);  // GPU führt Vertex Shader sampleCount-mal aus!
-
+        renderPass.setBindGroup(0, activeBindGroup);
+        renderPass.draw(drawCount);
         renderPass.end();
 
-        // ========== SUBMIT ==========
-        // Schick alle Kommandos an die GPU (jetzt passiert's wirklich!)
         this.device.queue.submit([commandEncoder.finish()]);
     }
 
@@ -480,5 +436,25 @@ export class WebGPURenderer {
         this.canvas.width = width;
         this.canvas.height = height;
         this.createMSAATexture();
+
+        // Downsampler Buffer anpassen
+        this.downsampler?.onResize(width);
+
+        // GPU Buffer für Downsampled Mode neu erstellen
+        if (this.device && this.pipeline && this.uniformBuffer) {
+            this.downsampledBuffer?.destroy();
+            this.downsampledBuffer = this.device.createBuffer({
+                size: Math.max(width * 2 * 4, 256),
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+
+            this.downsampledBindGroup = this.device.createBindGroup({
+                layout: this.pipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: this.downsampledBuffer } },
+                    { binding: 1, resource: { buffer: this.uniformBuffer } }
+                ]
+            });
+        }
     }
 }
