@@ -227,14 +227,17 @@ export class ErosChart {
     /**
      * Gibt aktuelle Statistiken zurück
      */
-    getStats(): { totalSamples: number; visibleSamples: number; bufferSize: number } {
+    getStats(): { totalSamples: number; visibleSamples: number; bufferSize: number; isDownsampled: boolean; renderedVertices: number } {
         const totalSamples = this.ringBuffer?.currentHead ?? 0;
         const visibleSamples = Math.floor(this.viewportEnd - this.viewportStart);
+        const dsResult = this.renderer?.getLastDownsampleResult();
 
         return {
-            totalSamples,           // Wie viele Samples insgesamt empfangen wurden
-            visibleSamples,         // Wie viele Samples gerade sichtbar sind (Zoom)
-            bufferSize: this.options.bufferSize  // Buffer-Kapazität
+            totalSamples,
+            visibleSamples,
+            bufferSize: this.options.bufferSize,
+            isDownsampled: dsResult?.isDownsampled ?? false,
+            renderedVertices: dsResult?.vertexCount ?? visibleSamples,
         };
     }
 
@@ -400,21 +403,20 @@ export class ErosChart {
                 const currentHead = this.ringBuffer!.currentHead;
 
                 if (currentHead > 0) {
-                    // Finde Min/Max für Grid
-                    let min = Infinity, max = -Infinity;
-                    const start = Math.max(0, this.viewportStart);
-                    const end = Math.min(currentHead, this.viewportEnd);
-
-                    for (let i = start; i < end; i++) {
-                        const v = this.ringBuffer!.data[i];
-                        if (v < min) min = v;
-                        if (v > max) max = v;
+                    // Min/Max vom Downsampler übernehmen (statt eigener Loop!)
+                    const dsResult = this.renderer?.getLastDownsampleResult();
+                    if (dsResult) {
+                        const start = Math.max(0, this.viewportStart);
+                        const end = Math.min(currentHead, this.viewportEnd);
+                        this.gridOverlay?.draw(
+                            dsResult.globalMin,
+                            dsResult.globalMax,
+                            end - start,
+                            this.options.sampleRate
+                        );
+                    } else {
+                        this.gridOverlay?.draw(-2.5, 2.5, this.options.bufferSize, this.options.sampleRate);
                     }
-
-                    if (min === Infinity) min = -2.5;
-                    if (max === -Infinity) max = 2.5;
-
-                    this.gridOverlay?.draw(min, max, end - start, this.options.sampleRate);
                 } else {
                     this.gridOverlay?.draw(-2.5, 2.5, this.options.bufferSize, this.options.sampleRate);
                 }

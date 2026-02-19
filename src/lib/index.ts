@@ -13,3 +13,5 @@ export { WebGPURenderer } from './renderer/WebGPURenderer';
 export { GridOverlay } from './renderer/GridOverlay';
 export { CrosshairOverlay } from './renderer/CrosshairOverlay';
 export { SharedRingBuffer } from './core/SharedRingBuffer';
+export { Downsampler } from './core/Downsampler';
+export type { DownsampleResult } from './core/Downsampler';

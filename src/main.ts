@@ -92,6 +92,7 @@ function updateDataStats(): void {
         dataStatsEl.innerHTML = `
             • Total: ${stats.totalSamples.toLocaleString()} samples (${totalMB} MB)<br>
             • Visible: ${stats.visibleSamples.toLocaleString()} samples (${zoomFactor}x zoom)<br>
+            • Rendered: ${stats.renderedVertices.toLocaleString()} vertices (${stats.isDownsampled ? 'DOWNSAMPLED' : 'EXACT'})<br>
             • Buffer: ${stats.totalSamples.toLocaleString()} / ${stats.bufferSize.toLocaleString()} (${bufferUsage}%)<br>
             • Memory: ${totalMB} / ${bufferMB} MB
         `;
