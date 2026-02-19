@@ -1,32 +1,20 @@
-/**
- * CrosshairOverlay.ts
- *
- * Canvas2D Overlay für interaktives Crosshair (Fadenkreuz)
- *
- * WAS macht diese Klasse?
- * - Zeigt vertikale + horizontale Linie an der Maus-Position
- * - Zeigt Zeit (X) und Y-Wert an der Cursor-Position
- * - Nutzt Canvas2D (kein WebGPU nötig für UI-Elemente)
- *
- * WARUM Canvas2D statt WebGPU?
- * - Crosshair ist UI, kein Daten-Rendering
- * - Canvas2D ist einfacher für Linien + Text
- * - WebGPU wäre Overkill (zu komplex für simple Linien)
- *
- * WIE funktioniert's?
- * - Overlay Canvas liegt ÜBER dem WebGPU Canvas
- * - pointer-events: none → Maus-Events gehen durch zum WebGPU Canvas
- * - mousemove Event trackt Cursor-Position
- * - Interpoliert Y-Wert aus SharedArrayBuffer
- */
-
 import { SharedRingBuffer } from '../core/SharedRingBuffer';
 
 export interface CrosshairOptions {
-    lineColor?: string;      // Farbe der Crosshair-Linien (default: '#00ff00')
-    textColor?: string;      // Farbe des Werte-Texts (default: '#00ff00')
-    lineWidth?: number;      // Dicke der Linien (default: 1)
-    fontSize?: number;       // Schriftgröße (default: 12)
+    lineColor?: string;      // Crosshair line color (default: '#00ff00')
+    textColor?: string;      // Value label color (default: '#00ff00')
+    lineWidth?: number;      // Line width (default: 1)
+    fontSize?: number;       // Font size (default: 12)
+    snapEnabled?: boolean;   // Snap to nearest point (default: true)
+    snapRadiusPx?: number;   // Snap radius in pixels (default: 10)
+}
+
+interface SnapCandidate {
+    snapped: boolean;
+    x: number;
+    y: number;
+    sampleIndex: number;
+    value: number;
 }
 
 export class CrosshairOverlay {
@@ -36,20 +24,30 @@ export class CrosshairOverlay {
     private buffer: SharedRingBuffer;
     private sampleRate: number;
 
-    private mouseX: number = -1;  // -1 = außerhalb
-    private mouseY: number = -1;
+    private mouseX = -1;  // -1 = outside
+    private mouseY = -1;
 
     private lineColor: string;
     private textColor: string;
     private lineWidth: number;
     private fontSize: number;
+    private snapEnabled: boolean;
+    private snapRadiusPx: number;
 
-    // Viewport Info (wird von ErosChart gesetzt)
+    // Viewport info (updated from ErosChart)
     private viewport = {
         startIndex: 0,
         endIndex: 100_000,
         minValue: -2.5,
         maxValue: 2.5,
+    };
+
+    private readonly handleMouseMove = (event: MouseEvent): void => {
+        this.onMouseMove(event);
+    };
+
+    private readonly handleMouseLeave = (): void => {
+        this.onMouseLeave();
     };
 
     constructor(
@@ -62,47 +60,42 @@ export class CrosshairOverlay {
         this.buffer = buffer;
         this.sampleRate = sampleRate;
 
-        // Options mit Defaults
+        // Options with defaults
         this.lineColor = options.lineColor ?? '#00ff00';
         this.textColor = options.textColor ?? '#00ff00';
         this.lineWidth = options.lineWidth ?? 1;
         this.fontSize = options.fontSize ?? 12;
+        this.snapEnabled = options.snapEnabled ?? true;
+        this.snapRadiusPx = options.snapRadiusPx ?? 10;
 
-        // ========== Canvas2D Overlay erstellen ==========
-        // Liegt ÜBER dem WebGPU Canvas (position: absolute)
+        // Create canvas2D overlay above the WebGPU canvas
         this.canvas = document.createElement('canvas');
         this.canvas.style.position = 'absolute';
         this.canvas.style.top = '0';
         this.canvas.style.left = '0';
-        this.canvas.style.pointerEvents = 'none';  // Maus-Events gehen durch!
-        this.canvas.style.zIndex = '10';  // Über WebGPU Canvas
+        this.canvas.style.pointerEvents = 'none';
+        this.canvas.style.zIndex = '10';
 
         const ctx = this.canvas.getContext('2d');
         if (!ctx) {
-            throw new Error('Canvas2D Context nicht verfügbar');
+            throw new Error('Canvas2D context is not available');
         }
         this.ctx = ctx;
 
-        // Canvas an Parent Container hängen
         const container = parentCanvas.parentElement;
         if (!container) {
-            throw new Error('Parent Canvas hat keinen Container');
+            throw new Error('Parent canvas has no container');
         }
         container.appendChild(this.canvas);
 
-        // ========== Canvas Size = Parent Size ==========
         this.resize();
 
-        // ========== Maus-Tracking ==========
-        // WICHTIG: Event Listener am PARENT Canvas (weil Overlay pointer-events: none hat)
-        this.parentCanvas.addEventListener('mousemove', this.onMouseMove.bind(this));
-        this.parentCanvas.addEventListener('mouseleave', this.onMouseLeave.bind(this));
+        // Track pointer on parent canvas because overlay is pointer-events none
+        this.parentCanvas.addEventListener('mousemove', this.handleMouseMove);
+        this.parentCanvas.addEventListener('mouseleave', this.handleMouseLeave);
     }
 
-    /**
-     * Canvas-Größe an Parent anpassen
-     * Wird bei Window-Resize aufgerufen
-     */
+    /** Resize overlay to match parent canvas size */
     public resize(): void {
         const rect = this.parentCanvas.getBoundingClientRect();
         this.canvas.width = rect.width;
@@ -111,10 +104,7 @@ export class CrosshairOverlay {
         this.canvas.style.height = `${rect.height}px`;
     }
 
-    /**
-     * Viewport Update von ErosChart
-     * Wird aufgerufen wenn User zoomt/pant
-     */
+    /** Update viewport from ErosChart (zoom/pan + y-range) */
     public updateViewport(startIndex: number, endIndex: number, minValue: number, maxValue: number): void {
         this.viewport.startIndex = startIndex;
         this.viewport.endIndex = endIndex;
@@ -122,35 +112,24 @@ export class CrosshairOverlay {
         this.viewport.maxValue = maxValue;
     }
 
-    /**
-     * Mouse Move Event Handler
-     */
     private onMouseMove(event: MouseEvent): void {
         const rect = this.parentCanvas.getBoundingClientRect();
         this.mouseX = event.clientX - rect.left;
         this.mouseY = event.clientY - rect.top;
-        console.log(`Crosshair: mouseX=${this.mouseX}, mouseY=${this.mouseY}`);
-        this.draw();  // Redraw mit neuer Position
+        this.draw();
     }
 
-    /**
-     * Mouse Leave Event Handler
-     */
     private onMouseLeave(): void {
         this.mouseX = -1;
         this.mouseY = -1;
-        this.clear();  // Crosshair ausblenden
+        this.clear();
     }
 
-    /**
-     * Crosshair zeichnen
-     */
+    /** Draw crosshair. Snaps to nearest visible data point if within snap radius. */
     public draw(): void {
         this.clear();
 
-        // Nur zeichnen wenn Maus innerhalb Canvas
         if (this.mouseX < 0 || this.mouseY < 0) {
-            console.log('Crosshair: Mouse outside canvas');
             return;
         }
 
@@ -158,55 +137,154 @@ export class CrosshairOverlay {
         const width = this.canvas.width;
         const height = this.canvas.height;
 
-        console.log(`Crosshair: Drawing at ${this.mouseX},${this.mouseY} on canvas ${width}x${height}`);
+        const snap = this.getSnapCandidate(this.mouseX, this.mouseY);
+        const crosshairX = snap.x;
+        const crosshairY = snap.y;
 
-        // ========== Werte berechnen ==========
-        const timeValue = this.getTimeAtX(this.mouseX);
-        const yValue = this.getYValueAtX(this.mouseX);
+        const timeValue = snap.snapped
+            ? snap.sampleIndex / this.sampleRate
+            : this.getTimeAtX(this.mouseX);
 
-        // ========== Crosshair Linien zeichnen ==========
+        const yValue = snap.snapped
+            ? snap.value
+            : this.getInterpolatedValueAtX(this.mouseX);
+
+        // Crosshair lines
         ctx.strokeStyle = this.lineColor;
         ctx.lineWidth = this.lineWidth;
-        ctx.setLineDash([5, 5]);  // Gestrichelte Linie (5px an, 5px aus)
+        ctx.setLineDash([5, 5]);
 
         ctx.beginPath();
-        // Vertikale Linie
-        ctx.moveTo(this.mouseX, 0);
-        ctx.lineTo(this.mouseX, height);
-        // Horizontale Linie
-        ctx.moveTo(0, this.mouseY);
-        ctx.lineTo(width, this.mouseY);
+        ctx.moveTo(crosshairX, 0);
+        ctx.lineTo(crosshairX, height);
+        ctx.moveTo(0, crosshairY);
+        ctx.lineTo(width, crosshairY);
         ctx.stroke();
 
-        ctx.setLineDash([]);  // Reset zu durchgezogener Linie
+        ctx.setLineDash([]);
 
-        // ========== Text zeichnen ==========
+        // Highlight snapped point
+        if (snap.snapped) {
+            ctx.fillStyle = this.lineColor;
+            ctx.beginPath();
+            ctx.arc(crosshairX, crosshairY, 3, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // Labels
         ctx.fillStyle = this.textColor;
         ctx.font = `${this.fontSize}px monospace`;
 
-        // Zeit-Text (oben rechts an vertikaler Linie)
         const timeText = `t: ${timeValue.toFixed(4)}s`;
         const timeMetrics = ctx.measureText(timeText);
-        const timeX = this.mouseX + 8;  // 8px Abstand von Linie
-        const timeY = 15;
+        const timeX = Math.max(6, Math.min(crosshairX + 8, width - timeMetrics.width - 6));
+        const timeY = Math.max(this.fontSize + 2, Math.min(15, height - 2));
 
-        // Hintergrund für bessere Lesbarkeit
         this.drawTextBackground(ctx, timeX, timeY, timeMetrics.width, this.fontSize);
         ctx.fillText(timeText, timeX, timeY);
 
-        // Y-Wert Text (links an horizontaler Linie)
         const yText = `y: ${yValue.toFixed(3)}`;
         const yMetrics = ctx.measureText(yText);
         const yX = 8;
-        const yY = this.mouseY - 5;
+        const yY = Math.max(this.fontSize + 2, Math.min(crosshairY - 5, height - 2));
 
         this.drawTextBackground(ctx, yX, yY, yMetrics.width, this.fontSize);
         ctx.fillText(yText, yX, yY);
     }
 
-    /**
-     * Hintergrund-Box für Text (für bessere Lesbarkeit)
-     */
+    /** Compute nearest snap point in a local search window around cursor x */
+    private getSnapCandidate(mouseX: number, mouseY: number): SnapCandidate {
+        const fallbackValue = this.getInterpolatedValueAtX(mouseX);
+        const fallbackSample = Math.round(this.getSampleIndexAtX(mouseX));
+
+        const fallback: SnapCandidate = {
+            snapped: false,
+            x: mouseX,
+            y: mouseY,
+            sampleIndex: fallbackSample,
+            value: fallbackValue,
+        };
+
+        if (!this.snapEnabled || this.snapRadiusPx <= 0) {
+            return fallback;
+        }
+
+        const width = this.canvas.width;
+        const visibleStart = Math.max(0, Math.floor(this.viewport.startIndex));
+        const visibleEnd = Math.min(this.buffer.data.length, Math.ceil(this.viewport.endIndex));
+        const visibleCount = visibleEnd - visibleStart;
+
+        if (width <= 0 || visibleCount <= 0) {
+            return fallback;
+        }
+
+        const samplesPerPixel = visibleCount / width;
+        const radiusSamples = Math.max(1, Math.ceil(this.snapRadiusPx * samplesPerPixel));
+
+        const centerIndex = Math.round(this.getSampleIndexAtX(mouseX));
+        const searchStart = this.clamp(centerIndex - radiusSamples, visibleStart, visibleEnd - 1);
+        const searchEnd = this.clamp(centerIndex + radiusSamples, visibleStart, visibleEnd - 1);
+
+        if (searchEnd < searchStart) {
+            return fallback;
+        }
+
+        const maxCandidates = 4_000;
+        const totalCandidates = searchEnd - searchStart + 1;
+        const coarseStep = Math.max(1, Math.ceil(totalCandidates / maxCandidates));
+
+        let bestIndex = -1;
+        let bestX = mouseX;
+        let bestY = mouseY;
+        let bestDistSq = Number.POSITIVE_INFINITY;
+
+        const evaluateIndex = (index: number): void => {
+            const value = this.buffer.data[index];
+            const pointX = this.sampleIndexToCanvasX(index);
+            const pointY = this.valueToCanvasY(value);
+            const dx = pointX - mouseX;
+            const dy = pointY - mouseY;
+            const distSq = dx * dx + dy * dy;
+
+            if (distSq < bestDistSq) {
+                bestDistSq = distSq;
+                bestIndex = index;
+                bestX = pointX;
+                bestY = pointY;
+            }
+        };
+
+        for (let i = searchStart; i <= searchEnd; i += coarseStep) {
+            evaluateIndex(i);
+        }
+
+        // Refine around the best coarse match with exact step=1 lookup
+        if (bestIndex >= 0 && coarseStep > 1) {
+            const refineStart = Math.max(searchStart, bestIndex - coarseStep);
+            const refineEnd = Math.min(searchEnd, bestIndex + coarseStep);
+            for (let i = refineStart; i <= refineEnd; i++) {
+                evaluateIndex(i);
+            }
+        }
+
+        if (bestIndex < 0) {
+            return fallback;
+        }
+
+        const snapRadiusSq = this.snapRadiusPx * this.snapRadiusPx;
+        if (bestDistSq > snapRadiusSq) {
+            return fallback;
+        }
+
+        return {
+            snapped: true,
+            x: bestX,
+            y: bestY,
+            sampleIndex: bestIndex,
+            value: this.buffer.data[bestIndex],
+        };
+    }
+
     private drawTextBackground(
         ctx: CanvasRenderingContext2D,
         x: number,
@@ -214,63 +292,79 @@ export class CrosshairOverlay {
         width: number,
         height: number
     ): void {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';  // Halbtransparent schwarz
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
         ctx.fillRect(x - 3, y - height, width + 6, height + 4);
-        ctx.fillStyle = this.textColor;  // Zurück zur Text-Farbe
+        ctx.fillStyle = this.textColor;
     }
 
-    /**
-     * Berechne Zeit (in Sekunden) für X-Position
-     */
     private getTimeAtX(x: number): number {
-        const width = this.canvas.width;
-        const progress = x / width;  // 0.0 bis 1.0
-
-        const sampleIndex = this.viewport.startIndex +
-            progress * (this.viewport.endIndex - this.viewport.startIndex);
-
+        const sampleIndex = this.getSampleIndexAtX(x);
         return sampleIndex / this.sampleRate;
     }
 
-    /**
-     * Berechne Y-Wert für X-Position
-     */
-    private getYValueAtX(x: number): number {
+    private getSampleIndexAtX(x: number): number {
         const width = this.canvas.width;
-        const progress = x / width;
-
-        const sampleIndex = this.viewport.startIndex +
-            progress * (this.viewport.endIndex - this.viewport.startIndex);
-
-        // Sample Index abrunden/aufrunden für Interpolation
-        const indexFloor = Math.floor(sampleIndex);
-        const indexCeil = Math.ceil(sampleIndex);
-
-        // Bounds check
-        if (indexFloor < 0 || indexCeil >= this.buffer.data.length) {
-            return 0;
+        if (width <= 0) {
+            return this.viewport.startIndex;
         }
 
-        // Samples aus Buffer lesen (direkt auf data[] zugreifen!)
+        const progress = this.clamp(x / width, 0, 1);
+        return this.viewport.startIndex + progress * (this.viewport.endIndex - this.viewport.startIndex);
+    }
+
+    private getInterpolatedValueAtX(x: number): number {
+        const sampleIndex = this.getSampleIndexAtX(x);
+        const maxIndex = this.buffer.data.length - 1;
+
+        const indexFloor = this.clamp(Math.floor(sampleIndex), 0, maxIndex);
+        const indexCeil = this.clamp(Math.ceil(sampleIndex), 0, maxIndex);
+
         const valueFloor = this.buffer.data[indexFloor];
         const valueCeil = this.buffer.data[indexCeil];
 
-        // Linear interpolieren
         const fraction = sampleIndex - indexFloor;
         return valueFloor + (valueCeil - valueFloor) * fraction;
     }
 
-    /**
-     * Canvas löschen
-     */
+    private sampleIndexToCanvasX(index: number): number {
+        const width = this.canvas.width;
+        const visibleCount = this.viewport.endIndex - this.viewport.startIndex;
+
+        if (width <= 0 || visibleCount <= 0) {
+            return 0;
+        }
+
+        const normalizedX = (index - this.viewport.startIndex) / visibleCount;
+        return normalizedX * width;
+    }
+
+    /** Match renderer Y transform including 5% top/bottom padding from shader */
+    private valueToCanvasY(value: number): number {
+        const height = this.canvas.height;
+        const range = this.viewport.maxValue - this.viewport.minValue;
+
+        if (height <= 0 || range <= 0) {
+            return height * 0.5;
+        }
+
+        const normalizedY = (value - this.viewport.minValue) / range;
+        const ndcY = (normalizedY * 2 - 1) * 0.95;
+        const screenY = (1 - (ndcY * 0.5 + 0.5)) * height;
+
+        return this.clamp(screenY, 0, height);
+    }
+
+    private clamp(value: number, min: number, max: number): number {
+        return Math.max(min, Math.min(max, value));
+    }
+
     private clear(): void {
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     }
 
-    /**
-     * Cleanup (wird bei destroy aufgerufen)
-     */
     public destroy(): void {
+        this.parentCanvas.removeEventListener('mousemove', this.handleMouseMove);
+        this.parentCanvas.removeEventListener('mouseleave', this.handleMouseLeave);
         this.canvas.remove();
     }
 }

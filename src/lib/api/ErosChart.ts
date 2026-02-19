@@ -1,5 +1,5 @@
-/**
- * ErosChart - Haupt-API für High-Performance gRPC Charts
+﻿/**
+ * ErosChart - Haupt-API fÃ¼r High-Performance gRPC Charts
  *
  * VERWENDUNG:
  * ```typescript
@@ -27,17 +27,19 @@ import { CrosshairOverlay } from '../renderer/CrosshairOverlay';
 import { SharedRingBuffer } from '../core/SharedRingBuffer';
 
 /**
- * Konfigurations-Optionen für ErosChart
+ * Konfigurations-Optionen fÃ¼r ErosChart
  */
 export interface ErosChartOptions {
     grpcUrl: string;        // gRPC Server URL (z.B. 'http://localhost:50051')
     bufferSize?: number;    // Wie viele Samples im Buffer? (default: 100_000)
     sampleRate?: number;    // Samples pro Sekunde (default: 10_000 = 10kHz)
-    lineColor?: string;     // Linienfarbe als Hex (z.B. '#00ff00', default: grün)
+    lineColor?: string;     // Linienfarbe als Hex (z.B. '#00ff00', default: grÃ¼n)
+    snapEnabled?: boolean;  // Enable crosshair snapping (default: true)
+    snapRadiusPx?: number;  // Snap radius in pixels (default: 10)
 }
 
 /**
- * Optionen für Stream-Start
+ * Optionen fÃ¼r Stream-Start
  */
 export interface StreamOptions {
     duration?: number;      // Wie lange streamen? (Sekunden, default: 30)
@@ -70,7 +72,7 @@ export class ErosChart {
      * @param options - Konfigurations-Optionen
      */
     constructor(canvasOrSelector: string | HTMLCanvasElement, options: ErosChartOptions) {
-        // Canvas auflösen (entweder Element direkt oder per Selector)
+        // Canvas auflÃ¶sen (entweder Element direkt oder per Selector)
         if (typeof canvasOrSelector === 'string') {
             const element = document.querySelector(canvasOrSelector);
             if (!element || !(element instanceof HTMLCanvasElement)) {
@@ -86,7 +88,9 @@ export class ErosChart {
             grpcUrl: options.grpcUrl,
             bufferSize: options.bufferSize ?? 100_000,  // 10 Sekunden @ 10kHz
             sampleRate: options.sampleRate ?? 10_000,   // 10kHz
-            lineColor: options.lineColor ?? '#00ff00',  // Grün als Default
+            lineColor: options.lineColor ?? '#00ff00',  // GrÃ¼n als Default
+            snapEnabled: options.snapEnabled ?? true,
+            snapRadiusPx: options.snapRadiusPx ?? 10,
         };
     }
 
@@ -123,7 +127,11 @@ export class ErosChart {
         this.crosshairOverlay = new CrosshairOverlay(
             this.canvas,
             this.ringBuffer,
-            this.options.sampleRate
+            this.options.sampleRate,
+            {
+                snapEnabled: this.options.snapEnabled,
+                snapRadiusPx: this.options.snapRadiusPx,
+            }
         );
 
         // ========== WEB WORKER ==========
@@ -158,7 +166,7 @@ export class ErosChart {
      */
     async startStream(options: StreamOptions = {}): Promise<void> {
         if (this.isStreaming) {
-            console.warn('ErosChart: Stream läuft bereits!');
+            console.warn('ErosChart: Stream lÃ¤uft bereits!');
             return;
         }
 
@@ -216,7 +224,7 @@ export class ErosChart {
     }
 
     /**
-     * Zurücksetzen auf vollständige Ansicht
+     * ZurÃ¼cksetzen auf vollstÃ¤ndige Ansicht
      */
     resetViewport(): void {
         this.viewportStart = 0;
@@ -225,7 +233,7 @@ export class ErosChart {
     }
 
     /**
-     * Gibt aktuelle Statistiken zurück
+     * Gibt aktuelle Statistiken zurÃ¼ck
      */
     getStats(): { totalSamples: number; visibleSamples: number; bufferSize: number; isDownsampled: boolean; renderedVertices: number } {
         const totalSamples = this.ringBuffer?.currentHead ?? 0;
@@ -249,7 +257,7 @@ export class ErosChart {
             cancelAnimationFrame(this.animationFrameId);
         }
         this.worker?.terminate();
-        console.log('ErosChart: Zerstört.');
+        console.log('ErosChart: ZerstÃ¶rt.');
     }
 
     // ========================================
@@ -389,7 +397,7 @@ export class ErosChart {
     }
 
     /**
-     * Render Loop - läuft mit 60fps
+     * Render Loop - lÃ¤uft mit 60fps
      */
     private startRenderLoop(): void {
         let lastGridUpdate = 0;
@@ -403,7 +411,7 @@ export class ErosChart {
                 const currentHead = this.ringBuffer!.currentHead;
 
                 if (currentHead > 0) {
-                    // Min/Max vom Downsampler übernehmen (statt eigener Loop!)
+                    // Min/Max vom Downsampler Ã¼bernehmen (statt eigener Loop!)
                     const dsResult = this.renderer?.getLastDownsampleResult();
                     if (dsResult) {
                         const start = Math.max(0, this.viewportStart);
@@ -430,3 +438,5 @@ export class ErosChart {
         this.animationFrameId = requestAnimationFrame(frame);
     }
 }
+
+
