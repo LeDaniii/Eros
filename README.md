@@ -136,6 +136,13 @@ Perfekt zum Lernen von WebGPU, SharedArrayBuffer, gRPC!
 - **TypeScript** (Type Safety)
 - **Vite** (Build Tool)
 
+## Binary Curve Format (`.erosb`)
+
+The app can export and import native binary curve files with the `.erosb` extension.
+
+- Spec: `docs/erosb-format.md`
+- APIs: `ErosChart.exportBinary()`, `ErosChart.decodeBinary()`, `ErosChart.loadData()`
+
 ## 🔧 Entwicklung
 
 ```bash
@@ -209,3 +216,4 @@ Noch offen - für private/firmeninternen Gebrauch OK!
 ---
 
 **Made with ❤️ für Prüfstände und High-Performance Visualisierung**
+

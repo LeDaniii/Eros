@@ -45,7 +45,17 @@ export interface StreamOptions {
     duration?: number;      // Wie lange streamen? (Sekunden, default: 30)
 }
 
+export interface ErosBinaryCurve {
+    sampleRate: number;
+    values: Float32Array;
+    version: number;
+}
+
 export class ErosChart {
+    private static readonly BINARY_MAGIC = new Uint8Array([0x45, 0x52, 0x4f, 0x53]); // "EROS"
+    private static readonly BINARY_VERSION = 1;
+    private static readonly BINARY_HEADER_SIZE = 20;
+
     // === Core Components ===
     private canvas: HTMLCanvasElement;
     private renderer: WebGPURenderer | null = null;
@@ -250,6 +260,115 @@ export class ErosChart {
     }
 
     /**
+     * Export current chart samples to the native EROS binary format (.erosb).
+     */
+    exportBinary(): ArrayBuffer {
+        if (!this.ringBuffer) {
+            throw new Error('ErosChart: initialize() must be called before export.');
+        }
+
+        const sampleCount = Math.max(0, Math.min(this.ringBuffer.currentHead, this.ringBuffer.data.length));
+        if (sampleCount < 1) {
+            throw new Error('ErosChart: no samples available for export.');
+        }
+
+        const values = this.ringBuffer.data.slice(0, sampleCount);
+        return ErosChart.encodeBinary(values, this.options.sampleRate);
+    }
+
+    /**
+     * Load sample data into the chart memory and update viewport.
+     */
+    loadData(values: Float32Array): void {
+        if (!this.ringBuffer || !this.renderer) {
+            throw new Error('ErosChart: initialize() must be called before loadData().');
+        }
+
+        const target = this.ringBuffer.data;
+        const sampleCount = Math.max(0, Math.min(values.length, target.length));
+
+        target.fill(0);
+        if (sampleCount > 0) {
+            target.set(values.subarray(0, sampleCount), 0);
+        }
+
+        Atomics.store(this.ringBuffer.head, 0, sampleCount);
+
+        this.viewportStart = 0;
+        this.viewportEnd = Math.max(sampleCount, 1);
+        this.renderer.setViewport(this.viewportStart, this.viewportEnd);
+
+        // Keep crosshair values coherent immediately after import, before next render frame.
+        if (this.crosshairOverlay) {
+            let minValue = Infinity;
+            let maxValue = -Infinity;
+
+            for (let i = 0; i < sampleCount; i++) {
+                const v = target[i];
+                if (v < minValue) minValue = v;
+                if (v > maxValue) maxValue = v;
+            }
+
+            if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+                minValue = -2.5;
+                maxValue = 2.5;
+            } else if (minValue === maxValue) {
+                minValue -= 0.5;
+                maxValue += 0.5;
+            } else {
+                const padding = (maxValue - minValue) * 0.05;
+                minValue -= padding;
+                maxValue += padding;
+            }
+
+            this.crosshairOverlay.updateViewport(
+                this.viewportStart,
+                this.viewportEnd,
+                minValue,
+                maxValue
+            );
+        }
+    }
+
+    /**
+     * Decode EROS binary data (.erosb) to samples.
+     */
+    static decodeBinary(fileBuffer: ArrayBuffer): ErosBinaryCurve {
+        if (fileBuffer.byteLength < ErosChart.BINARY_HEADER_SIZE) {
+            throw new Error('Invalid EROS file: file too small.');
+        }
+
+        const bytes = new Uint8Array(fileBuffer);
+        for (let i = 0; i < ErosChart.BINARY_MAGIC.length; i++) {
+            if (bytes[i] !== ErosChart.BINARY_MAGIC[i]) {
+                throw new Error('Invalid EROS file: magic header mismatch.');
+            }
+        }
+
+        const view = new DataView(fileBuffer);
+        const version = view.getUint16(4, true);
+        if (version !== ErosChart.BINARY_VERSION) {
+            throw new Error(`Unsupported EROS file version: ${version}.`);
+        }
+
+        const sampleRate = view.getUint32(8, true);
+        const sampleCount = view.getUint32(12, true);
+        if (sampleRate < 1) {
+            throw new Error('Invalid EROS file: sampleRate must be > 0.');
+        }
+
+        const expectedSize = ErosChart.BINARY_HEADER_SIZE + sampleCount * 4;
+        if (fileBuffer.byteLength !== expectedSize) {
+            throw new Error('Invalid EROS file: payload size mismatch.');
+        }
+
+        const values = new Float32Array(sampleCount);
+        values.set(new Float32Array(fileBuffer, ErosChart.BINARY_HEADER_SIZE, sampleCount));
+
+        return { sampleRate, values, version };
+    }
+
+    /**
      * Stoppt Rendering und gibt Ressourcen frei
      */
     destroy(): void {
@@ -436,6 +555,25 @@ export class ErosChart {
         };
 
         this.animationFrameId = requestAnimationFrame(frame);
+    }
+
+    private static encodeBinary(values: Float32Array, sampleRate: number): ArrayBuffer {
+        const normalizedSampleRate = Math.max(1, Math.floor(sampleRate));
+        const headerSize = ErosChart.BINARY_HEADER_SIZE;
+        const buffer = new ArrayBuffer(headerSize + values.length * 4);
+
+        const bytes = new Uint8Array(buffer);
+        bytes.set(ErosChart.BINARY_MAGIC, 0);
+
+        const view = new DataView(buffer);
+        view.setUint16(4, ErosChart.BINARY_VERSION, true);
+        view.setUint16(6, 0, true); // flags/reserved
+        view.setUint32(8, normalizedSampleRate, true);
+        view.setUint32(12, values.length, true);
+        view.setUint32(16, 0, true); // reserved
+
+        new Float32Array(buffer, headerSize, values.length).set(values);
+        return buffer;
     }
 }
 

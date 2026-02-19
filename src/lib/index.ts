@@ -6,7 +6,7 @@
 
 // === Main API ===
 export { ErosChart } from './api/ErosChart';
-export type { ErosChartOptions, StreamOptions } from './api/ErosChart';
+export type { ErosChartOptions, StreamOptions, ErosBinaryCurve } from './api/ErosChart';
 
 // === Advanced Components (falls jemand direkt darauf zugreifen will) ===
 export { WebGPURenderer } from './renderer/WebGPURenderer';

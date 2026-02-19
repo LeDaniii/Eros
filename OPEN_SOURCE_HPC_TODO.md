@@ -113,19 +113,35 @@ Date: 2026-02-19
 - [ ] Configure automated npm release for tags.
 - [ ] Automate changelog and versioning.
 
-## 11. Next 2 Weeks (Concrete)
+## 11. Power User v1 Scope (P0/P1)
+
+- [ ] `P0`: Dual cursors with delta readout (`dt`, `dY`, slope/frequency helpers).
+- [ ] `P0`: Multi-curve controls (visibility, color, units, per-curve Y lock/auto).
+- [ ] `P0`: Fast navigation (overview/minimap + jump to timestamp/sample index).
+- [ ] `P0`: Markers/bookmarks with notes for investigation findings.
+- [ ] `P0`: Session state save/load (viewport, curve config, markers, alignment).
+- [ ] `P0`: Export selected time range to `CSV` and `PNG` snapshot.
+- [ ] `P0`: Stream controls (pause/resume/reconnect + buffer occupancy indicator).
+- [ ] `P1`: Keyboard-first workflow (shortcuts for cursors, zoom presets, curve toggles).
+- [ ] `P1`: Data quality overlays (gaps, clipping, dropouts, saturation).
+- [ ] `P1`: Lightweight performance HUD (`FPS`, frame time, memory).
+
+## 12. Next 2 Weeks (Concrete)
 
 - [ ] Decouple worker configuration and implement proper stream abort.
 - [ ] Remove hot-path debug logs and isolate crosshair/grid redraw cost.
 - [ ] Implement incremental GPU uploads instead of full uploads.
 - [ ] Deliver first multi-curve API vertical slice (`addCurve/removeCurve`).
+- [ ] Deliver first power-user analysis slice (dual cursor + delta readout).
+- [ ] Add jump-to-time/sample command for fast navigation.
 - [ ] Build `5x2M` benchmark fixture and establish baseline metrics.
 - [ ] Add base OSS files (`LICENSE`, `CONTRIBUTING`, `CODE_OF_CONDUCT`).
 
-## 12. v1.0 Definition of Done
+## 13. v1.0 Definition of Done
 
 - [ ] Live Mode is stable for minute-long runs and useful for debugging.
 - [ ] Investigation Mode can overlay `5 x 2M` points with smooth interaction.
 - [ ] Peak/spike preservation is proven by tests and benchmarks.
+- [ ] Power-user analysis flow is usable end-to-end (cursor delta, markers, export, session restore).
 - [ ] API is documented, versioned, and OSS-ready.
 - [ ] CI/CD and release process are reproducible.
