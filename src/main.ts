@@ -2,16 +2,40 @@
  * Demo app for Eros Charts
  */
 
-import { ErosChart } from './lib/api/ErosChart';
+import { ErosChart, type ErosBinaryCurve } from './lib/api/ErosChart';
 
 // ==========================================
 // GLOBAL STATE
 // ==========================================
 let chart: ErosChart | null = null;
 let isStreaming = false;
+let currentViewMode: 'idle' | 'live' | 'binary' = 'idle';
+let binaryOverlayCharts: ErosChart[] = [];
+let binaryOverlayCanvases: HTMLCanvasElement[] = [];
+let binaryCompareSyncFrameId: number | null = null;
+
+interface ImportedBinaryEntry {
+    fileName: string;
+    decoded: ErosBinaryCurve;
+    fileSizeBytes: number;
+    color: string;
+    visible: boolean;
+}
+
+let importedBinaryEntries: ImportedBinaryEntry[] = [];
 
 const DEFAULT_GRPC_URL = 'http://localhost:50051';
 const EROS_BINARY_EXTENSION = '.erosb';
+const BINARY_COMPARE_COLORS = [
+    '#00d1ff',
+    '#ff6b6b',
+    '#ffd166',
+    '#06d6a0',
+    '#c77dff',
+    '#f4a261',
+    '#8ecae6',
+    '#ff99c8',
+];
 
 // ==========================================
 // UI CONTROL PANEL
@@ -61,7 +85,23 @@ function createControlPanel(): HTMLDivElement {
                 style="width: 100%; margin-top: 8px; padding: 8px; background: #1f3f6f; color: #d5e8ff; border: 1px solid #4aa3ff; cursor: pointer; font-weight: bold; font-size: 12px; border-radius: 5px;">
             LOAD .EROSB
         </button>
-        <input id="loadBinaryInput" type="file" accept=".erosb,application/octet-stream" style="display: none;" />
+        <input id="loadBinaryInput" type="file" accept=".erosb,application/octet-stream" multiple style="display: none;" />
+        <div id="binaryBrowserPanel" style="display: none; margin-top: 10px; border: 1px solid #2d4f7a; border-radius: 6px; padding: 8px; background: rgba(20, 35, 55, 0.7);">
+            <div id="binaryBrowserTitle" style="font-size: 11px; color: #8cc4ff; margin-bottom: 6px; font-weight: bold;">
+                BINARY FILE BROWSER
+            </div>
+            <div style="display: flex; gap: 6px; align-items: center;">
+                <button id="binaryPrevBtn"
+                        style="padding: 4px 8px; background: #1b2f47; color: #cfe7ff; border: 1px solid #4aa3ff; cursor: pointer; border-radius: 4px;">◀</button>
+                <select id="binaryFileSelect"
+                        style="flex: 1; min-width: 0; padding: 5px; background: #0f1b29; color: #cfe7ff; border: 1px solid #4aa3ff; font-family: monospace; font-size: 11px;">
+                </select>
+                <button id="binaryNextBtn"
+                        style="padding: 4px 8px; background: #1b2f47; color: #cfe7ff; border: 1px solid #4aa3ff; cursor: pointer; border-radius: 4px;">▶</button>
+            </div>
+            <div id="binaryBrowserInfo" style="margin-top: 6px; font-size: 10px; color: #9fb7d1; line-height: 1.3;">
+            </div>
+        </div>
         <div id="statsPanel" style="margin-top: 15px; font-size: 11px; color: #0f0; border-top: 1px solid #333; padding-top: 10px;">
             <div id="statusText">Ready | Scroll to zoom, drag to pan</div>
             <div id="dataStats" style="margin-top: 5px; color: #888; font-family: monospace;">
@@ -108,7 +148,15 @@ function updateDataStats(): void {
 }
 
 async function createOrReplaceChart(sampleRate: number, bufferSize: number): Promise<ErosChart> {
+    destroyBinaryOverlayCharts();
+
+    const baseCanvas = document.getElementById('plotCanvas');
+    if (baseCanvas instanceof HTMLCanvasElement) {
+        baseCanvas.style.opacity = '1';
+    }
+
     if (chart) {
+        chart.setViewportChangeListener(null);
         chart.destroy();
     }
 
@@ -122,6 +170,233 @@ async function createOrReplaceChart(sampleRate: number, bufferSize: number): Pro
     await nextChart.initialize();
     chart = nextChart;
     return nextChart;
+}
+
+function destroyBinaryOverlayCharts(): void {
+    if (binaryCompareSyncFrameId !== null) {
+        cancelAnimationFrame(binaryCompareSyncFrameId);
+        binaryCompareSyncFrameId = null;
+    }
+
+    for (const overlayChart of binaryOverlayCharts) {
+        overlayChart.setViewportChangeListener(null);
+        overlayChart.destroy();
+    }
+    binaryOverlayCharts = [];
+
+    for (const overlayCanvas of binaryOverlayCanvases) {
+        overlayCanvas.remove();
+    }
+    binaryOverlayCanvases = [];
+}
+
+function getPlotContainer(): HTMLDivElement {
+    const container = document.getElementById('canvas-container');
+    if (!(container instanceof HTMLDivElement)) {
+        throw new Error('Canvas container not found.');
+    }
+    return container;
+}
+
+function createBinaryOverlayCanvas(_zIndex: number): HTMLCanvasElement {
+    const container = getPlotContainer();
+    const canvas = document.createElement('canvas');
+    canvas.width = container.clientWidth;
+    canvas.height = container.clientHeight;
+    canvas.style.position = 'absolute';
+    canvas.style.top = '0';
+    canvas.style.left = '0';
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.style.pointerEvents = 'none';
+    canvas.style.zIndex = '1';
+    canvas.dataset.role = 'binary-overlay';
+    container.appendChild(canvas);
+    return canvas;
+}
+
+function formatBinaryDuration(seconds: number): string {
+    if (!Number.isFinite(seconds)) return '0s';
+    if (seconds >= 10) return `${seconds.toFixed(2)}s`;
+    if (seconds >= 1) return `${seconds.toFixed(3)}s`;
+    return `${seconds.toFixed(4)}s`;
+}
+
+function escapeHtml(value: string): string {
+    return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function getBinaryCurveColor(index: number): string {
+    return BINARY_COMPARE_COLORS[index % BINARY_COMPARE_COLORS.length];
+}
+
+function applyBinaryCurveStyles(): void {
+    const primaryCanvas = document.getElementById('plotCanvas');
+    if (primaryCanvas instanceof HTMLCanvasElement) {
+        const primaryEntry = importedBinaryEntries[0];
+        primaryCanvas.style.opacity = primaryEntry?.visible === false ? '0' : '1';
+    }
+
+    if (chart && importedBinaryEntries[0]) {
+        chart.setLineColor(importedBinaryEntries[0].color);
+    }
+
+    for (let i = 0; i < binaryOverlayCharts.length; i++) {
+        const entry = importedBinaryEntries[i + 1];
+        if (!entry) {
+            continue;
+        }
+
+        binaryOverlayCharts[i].setLineColor(entry.color);
+
+        const overlayCanvas = binaryOverlayCanvases[i];
+        if (overlayCanvas) {
+            overlayCanvas.style.opacity = entry.visible ? '1' : '0';
+        }
+    }
+}
+
+function computeSharedBinaryYRange(startIndex: number, endIndex: number): { min: number; max: number } | null {
+    if (importedBinaryEntries.length === 0) {
+        return null;
+    }
+
+    let minValue = Infinity;
+    let maxValue = -Infinity;
+
+    for (const entry of importedBinaryEntries) {
+        if (!entry.visible) {
+            continue;
+        }
+
+        const values = entry.decoded.values;
+        if (values.length < 1) {
+            continue;
+        }
+
+        if (startIndex >= values.length || endIndex <= 0) {
+            continue;
+        }
+
+        const start = Math.max(0, Math.min(values.length - 1, Math.floor(startIndex)));
+        const end = Math.max(start + 1, Math.min(values.length, Math.ceil(endIndex)));
+
+        for (let i = start; i < end; i++) {
+            const value = values[i];
+            if (value < minValue) minValue = value;
+            if (value > maxValue) maxValue = value;
+        }
+    }
+
+    if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+        return null;
+    }
+
+    if (minValue === maxValue) {
+        return { min: minValue - 0.5, max: maxValue + 0.5 };
+    }
+
+    const padding = (maxValue - minValue) * 0.05;
+    return {
+        min: minValue - padding,
+        max: maxValue + padding,
+    };
+}
+
+function syncBinaryCompareCharts(): void {
+    binaryCompareSyncFrameId = null;
+
+    if (currentViewMode !== 'binary' || !chart) {
+        return;
+    }
+
+    const { startIndex, endIndex } = chart.getViewportRange();
+    for (const overlayChart of binaryOverlayCharts) {
+        overlayChart.setViewport(startIndex, endIndex);
+    }
+
+    const sharedRange = computeSharedBinaryYRange(startIndex, endIndex);
+    if (!sharedRange) {
+        chart.clearYRangeOverride();
+        for (const overlayChart of binaryOverlayCharts) {
+            overlayChart.clearYRangeOverride();
+        }
+        return;
+    }
+
+    chart.setYRangeOverride(sharedRange.min, sharedRange.max);
+    for (const overlayChart of binaryOverlayCharts) {
+        overlayChart.setYRangeOverride(sharedRange.min, sharedRange.max);
+    }
+}
+
+function scheduleBinaryCompareSync(): void {
+    if (binaryCompareSyncFrameId !== null) {
+        return;
+    }
+    binaryCompareSyncFrameId = requestAnimationFrame(syncBinaryCompareCharts);
+}
+
+async function createOrReplaceBinaryCompareCharts(entries: ImportedBinaryEntry[]): Promise<void> {
+    destroyBinaryOverlayCharts();
+
+    if (chart) {
+        chart.setViewportChangeListener(null);
+        chart.destroy();
+        chart = null;
+    }
+
+    if (entries.length === 0) {
+        throw new Error('No binary curves to render.');
+    }
+
+    const sampleRate = entries[0].decoded.sampleRate;
+    const maxSamples = entries.reduce((max, entry) => Math.max(max, entry.decoded.values.length), 0);
+    const bufferSize = Math.max(1024, Math.ceil(maxSamples * 1.1));
+
+    const primaryChart = new ErosChart('#plotCanvas', {
+        grpcUrl: DEFAULT_GRPC_URL,
+        bufferSize,
+        sampleRate,
+        lineColor: entries[0].color,
+        enableWorker: false,
+    });
+    await primaryChart.initialize();
+    primaryChart.loadData(entries[0].decoded.values);
+    primaryChart.setViewportChangeListener(() => {
+        scheduleBinaryCompareSync();
+    });
+
+    chart = primaryChart;
+
+    for (let i = 1; i < entries.length; i++) {
+        const overlayCanvas = createBinaryOverlayCanvas(i);
+        const overlayChart = new ErosChart(overlayCanvas, {
+            grpcUrl: DEFAULT_GRPC_URL,
+            bufferSize,
+            sampleRate,
+            lineColor: entries[i].color,
+            showGrid: false,
+            showCrosshair: false,
+            enableInteractions: false,
+            enableWorker: false,
+            transparentBackground: true,
+        });
+
+        await overlayChart.initialize();
+        overlayChart.loadData(entries[i].decoded.values);
+
+        binaryOverlayCanvases.push(overlayCanvas);
+        binaryOverlayCharts.push(overlayChart);
+    }
+
+    applyBinaryCurveStyles();
+    scheduleBinaryCompareSync();
 }
 
 // Update stats every 200ms
@@ -138,8 +413,108 @@ function setupButtonHandlers(): void {
     const downloadBinaryBtn = document.getElementById('downloadBinaryBtn') as HTMLButtonElement;
     const loadBinaryBtn = document.getElementById('loadBinaryBtn') as HTMLButtonElement;
     const loadBinaryInput = document.getElementById('loadBinaryInput') as HTMLInputElement;
+    const binaryBrowserPanel = document.getElementById('binaryBrowserPanel') as HTMLDivElement;
+    const binaryBrowserTitle = document.getElementById('binaryBrowserTitle') as HTMLDivElement;
+    const binaryBrowserInfo = document.getElementById('binaryBrowserInfo') as HTMLDivElement;
+    const binaryPrevBtn = document.getElementById('binaryPrevBtn') as HTMLButtonElement;
+    const binaryNextBtn = document.getElementById('binaryNextBtn') as HTMLButtonElement;
+    const binaryFileSelect = document.getElementById('binaryFileSelect') as HTMLSelectElement;
     const durationInput = document.getElementById('durationInput') as HTMLInputElement;
     const sampleRateInput = document.getElementById('sampleRateInput') as HTMLInputElement;
+
+    const resetStartButtonState = (): void => {
+        startBtn.disabled = false;
+        startBtn.textContent = 'START STREAM';
+        startBtn.style.background = '#00ff00';
+    };
+
+    const renderBinaryBrowser = (): void => {
+        const showBinaryBrowser = currentViewMode === 'binary' && importedBinaryEntries.length > 0;
+        binaryBrowserPanel.style.display = showBinaryBrowser ? 'block' : 'none';
+        binaryPrevBtn.style.display = 'none';
+        binaryNextBtn.style.display = 'none';
+        binaryFileSelect.style.display = 'none';
+
+        if (!showBinaryBrowser) {
+            return;
+        }
+
+        const sampleRate = importedBinaryEntries[0]?.decoded.sampleRate ?? 0;
+        const maxSamples = importedBinaryEntries.reduce((max, entry) => Math.max(max, entry.decoded.values.length), 0);
+        const maxDuration = sampleRate > 0 ? maxSamples / sampleRate : 0;
+        const visibleCount = importedBinaryEntries.filter((entry) => entry.visible).length;
+        binaryBrowserTitle.textContent = `BINARY OVERLAY (${visibleCount}/${importedBinaryEntries.length} visible)`;
+        binaryBrowserInfo.innerHTML = `
+            <div style="margin-bottom: 4px;">Shared X-axis: ${sampleRate.toLocaleString()} Hz | Window up to ${formatBinaryDuration(maxDuration)}</div>
+            ${importedBinaryEntries.map((entry, index) => {
+                const sampleCount = entry.decoded.values.length;
+                const duration = entry.decoded.sampleRate > 0 ? sampleCount / entry.decoded.sampleRate : 0;
+                const sizeKb = entry.fileSizeBytes / 1024;
+                const safeFileName = escapeHtml(entry.fileName);
+                const rowOpacity = entry.visible ? 1 : 0.55;
+                return `<div style="display:flex; align-items:center; gap:6px; margin-top:4px; opacity:${rowOpacity};">
+                    <input type="checkbox" data-curve-index="${index}" data-curve-action="visible" ${entry.visible ? 'checked' : ''}
+                           title="Show/hide curve" style="margin:0; accent-color:${entry.color}; cursor:pointer;" />
+                    <input type="color" data-curve-index="${index}" data-curve-action="color" value="${entry.color}"
+                           title="Curve color" style="width:22px; height:16px; padding:0; border:none; background:transparent; cursor:pointer;" />
+                    <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${entry.color}; box-shadow:0 0 6px ${entry.color};"></span>
+                    <span title="${safeFileName}" style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${index + 1}. ${safeFileName}</span>
+                    <span style="color:#9fb7d1;">${formatBinaryDuration(duration)} | ${sizeKb.toFixed(1)} KB</span>
+                </div>`;
+            }).join('')}
+        `;
+    };
+
+    const setViewMode = (mode: 'idle' | 'live' | 'binary'): void => {
+        currentViewMode = mode;
+        renderBinaryBrowser();
+    };
+
+    const handleBinaryCurveControlChange = (target: EventTarget | null, rerenderUi: boolean): void => {
+        if (!(target instanceof HTMLInputElement)) {
+            return;
+        }
+
+        const action = target.dataset.curveAction;
+        if (!action) {
+            return;
+        }
+
+        const index = Number.parseInt(target.dataset.curveIndex ?? '', 10);
+        if (!Number.isFinite(index) || index < 0 || index >= importedBinaryEntries.length) {
+            return;
+        }
+
+        const entry = importedBinaryEntries[index];
+        if (!entry) {
+            return;
+        }
+
+        if (action === 'visible' && target.type === 'checkbox') {
+            entry.visible = target.checked;
+            applyBinaryCurveStyles();
+            scheduleBinaryCompareSync();
+            renderBinaryBrowser();
+            return;
+        }
+
+        if (action === 'color' && target.type === 'color') {
+            entry.color = target.value;
+            applyBinaryCurveStyles();
+            if (rerenderUi) {
+                renderBinaryBrowser();
+            }
+        }
+    };
+
+    binaryBrowserInfo.addEventListener('change', (event) => {
+        handleBinaryCurveControlChange(event.target, true);
+    });
+
+    binaryBrowserInfo.addEventListener('input', (event) => {
+        handleBinaryCurveControlChange(event.target, false);
+    });
+
 
     startBtn.addEventListener('click', async () => {
         if (isStreaming) return;
@@ -157,6 +532,7 @@ function setupButtonHandlers(): void {
             await activeChart.startStream({ duration });
 
             isStreaming = true;
+            setViewMode('live');
             startBtn.disabled = true;
             startBtn.textContent = 'STREAMING...';
             startBtn.style.background = '#666';
@@ -164,9 +540,7 @@ function setupButtonHandlers(): void {
 
             setTimeout(() => {
                 isStreaming = false;
-                startBtn.disabled = false;
-                startBtn.textContent = 'START STREAM';
-                startBtn.style.background = '#00ff00';
+                resetStartButtonState();
                 updateStatus('Stream completed | Scroll to zoom, drag to pan');
             }, duration * 1000 + 2500);
 
@@ -174,9 +548,7 @@ function setupButtonHandlers(): void {
             const message = error instanceof Error ? error.message : String(error);
             updateStatus(`Error: ${message}`);
             isStreaming = false;
-            startBtn.disabled = false;
-            startBtn.textContent = 'START STREAM';
-            startBtn.style.background = '#00ff00';
+            resetStartButtonState();
         }
     });
 
@@ -218,35 +590,81 @@ function setupButtonHandlers(): void {
     });
 
     loadBinaryInput.addEventListener('change', async () => {
-        const file = loadBinaryInput.files?.[0];
-        if (!file) return;
+        const files = Array.from(loadBinaryInput.files ?? []);
+        if (files.length === 0) return;
 
         try {
-            updateStatus(`Loading ${file.name}...`);
+            updateStatus(
+                files.length === 1
+                    ? `Loading ${files[0].name}...`
+                    : `Loading ${files.length} binary files...`
+            );
 
-            const fileBuffer = await file.arrayBuffer();
-            const decoded = ErosChart.decodeBinary(fileBuffer);
+            const loadedEntries: ImportedBinaryEntry[] = [];
+            const failedFiles: string[] = [];
 
-            const sampleCount = decoded.values.length;
-            const bufferSize = Math.max(1024, Math.ceil(sampleCount * 1.1));
+            for (const file of files) {
+                try {
+                    const fileBuffer = await file.arrayBuffer();
+                    const decoded = ErosChart.decodeBinary(fileBuffer);
+                    loadedEntries.push({
+                        fileName: file.name,
+                        decoded,
+                        fileSizeBytes: file.size,
+                        color: '#00d1ff',
+                        visible: true,
+                    });
+                } catch (error: unknown) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    failedFiles.push(`${file.name} (${message})`);
+                }
+            }
 
-            const importedChart = await createOrReplaceChart(decoded.sampleRate, bufferSize);
-            importedChart.loadData(decoded.values);
+            if (loadedEntries.length === 0) {
+                throw new Error(failedFiles[0] ?? 'No valid .erosb files selected.');
+            }
 
+            const referenceSampleRate = loadedEntries[0].decoded.sampleRate;
+            const compatibleEntries: ImportedBinaryEntry[] = [];
+
+            for (const entry of loadedEntries) {
+                if (entry.decoded.sampleRate !== referenceSampleRate) {
+                    failedFiles.push(
+                        `${entry.fileName} (sample rate ${entry.decoded.sampleRate} Hz does not match ${referenceSampleRate} Hz)`
+                    );
+                    continue;
+                }
+                compatibleEntries.push(entry);
+            }
+
+            if (compatibleEntries.length === 0) {
+                throw new Error('No compatible binary files share the same sample rate.');
+            }
+
+            importedBinaryEntries = compatibleEntries.map((entry, index) => ({
+                ...entry,
+                color: getBinaryCurveColor(index),
+                visible: true,
+            }));
+            setViewMode('binary');
+
+            await createOrReplaceBinaryCompareCharts(importedBinaryEntries);
+            sampleRateInput.value = String(referenceSampleRate);
             isStreaming = false;
-            startBtn.disabled = false;
-            startBtn.textContent = 'START STREAM';
-            startBtn.style.background = '#00ff00';
+            resetStartButtonState();
+            renderBinaryBrowser();
 
-            sampleRateInput.value = String(decoded.sampleRate);
-
-            const durationSeconds = decoded.sampleRate > 0
-                ? decoded.values.length / decoded.sampleRate
-                : 0;
+            const totalSamples = importedBinaryEntries.reduce((sum, entry) => sum + entry.decoded.values.length, 0);
+            const maxSamples = importedBinaryEntries.reduce((max, entry) => Math.max(max, entry.decoded.values.length), 0);
+            const maxDuration = referenceSampleRate > 0 ? maxSamples / referenceSampleRate : 0;
 
             updateStatus(
-                `Loaded ${sampleCount.toLocaleString()} samples (${durationSeconds.toFixed(2)}s @ ${decoded.sampleRate.toLocaleString()} Hz)`
+                `Binary compare: ${importedBinaryEntries.length} curve(s) overlaid (${formatBinaryDuration(maxDuration)} max window, ${totalSamples.toLocaleString()} total samples)`
             );
+
+            if (failedFiles.length > 0) {
+                console.warn('Skipped binary files:', failedFiles);
+            }
         } catch (error: unknown) {
             const message = error instanceof Error ? error.message : String(error);
             updateStatus(`Load failed: ${message}`);
@@ -254,6 +672,8 @@ function setupButtonHandlers(): void {
             loadBinaryInput.value = '';
         }
     });
+
+    renderBinaryBrowser();
 }
 
 // ==========================================

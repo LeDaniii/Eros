@@ -19,6 +19,7 @@ export class GridOverlay {
         this.overlayCanvas.style.top = '0';
         this.overlayCanvas.style.left = '0';
         this.overlayCanvas.style.pointerEvents = 'none';
+        this.overlayCanvas.style.zIndex = '5';
 
         mainCanvas.parentElement?.appendChild(this.overlayCanvas);
 

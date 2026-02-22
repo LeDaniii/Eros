@@ -35,6 +35,13 @@ interface Viewport {
     endIndex: number;    // Letzter sichtbarer Sample (für Zoom)
 }
 
+interface ClearColor {
+    r: number;
+    g: number;
+    b: number;
+    a: number;
+}
+
 export class WebGPURenderer {
     // === GPU Core Resources ===
     private device: GPUDevice | null = null;           // Die GPU selbst (logisches Gerät)
@@ -72,6 +79,8 @@ export class WebGPURenderer {
 
     // === Line Color ===
     private lineColor: [number, number, number, number] = [0.0, 1.0, 0.0, 1.0];
+    private clearColor: ClearColor = { r: 0.05, g: 0.05, b: 0.05, a: 1 };
+    private yRangeOverride: { min: number; max: number } | null = null;
 
     constructor(private canvas: HTMLCanvasElement) { }
 
@@ -82,6 +91,20 @@ export class WebGPURenderer {
 
     public setLineColor(hexColor: string) {
         this.lineColor = this.hexToRGBA(hexColor);
+    }
+
+    public setTransparentBackground(enabled: boolean) {
+        this.clearColor = enabled
+            ? { r: 0, g: 0, b: 0, a: 0 }
+            : { r: 0.05, g: 0.05, b: 0.05, a: 1 };
+    }
+
+    public setYRangeOverride(minValue: number, maxValue: number) {
+        this.yRangeOverride = { min: minValue, max: maxValue };
+    }
+
+    public clearYRangeOverride() {
+        this.yRangeOverride = null;
     }
 
     private hexToRGBA(hex: string): [number, number, number, number] {
@@ -359,10 +382,15 @@ export class WebGPURenderer {
         this.lastDownsampleResult = result;
 
         // Min/Max vom Downsampler übernehmen (gratis Nebenprodukt!)
-        const range = result.globalMax - result.globalMin;
-        const padding = range * 0.05;
-        this.viewport.minValue = result.globalMin - padding;
-        this.viewport.maxValue = result.globalMax + padding;
+        if (this.yRangeOverride) {
+            this.viewport.minValue = this.yRangeOverride.min;
+            this.viewport.maxValue = this.yRangeOverride.max;
+        } else {
+            const range = result.globalMax - result.globalMin;
+            const padding = range * 0.05;
+            this.viewport.minValue = result.globalMin - padding;
+            this.viewport.maxValue = result.globalMax + padding;
+        }
 
         // === BUFFER + BIND GROUP WÄHLEN ===
         let activeBindGroup: GPUBindGroup;
@@ -418,7 +446,7 @@ export class WebGPURenderer {
             colorAttachments: [{
                 view: this.msaaTexture.createView(),
                 resolveTarget: currentTexture.createView(),
-                clearValue: { r: 0.05, g: 0.05, b: 0.05, a: 1 },
+                clearValue: this.clearColor,
                 loadOp: 'clear',
                 storeOp: 'store',
             }],

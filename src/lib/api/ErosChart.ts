@@ -37,6 +37,11 @@ export interface ErosChartOptions {
     snapEnabled?: boolean;  // Enable crosshair snapping (default: true)
     snapRadiusPx?: number;  // Snap radius in pixels (default: 14)
     snapIndicatorRadiusPx?: number; // Visual radius of snapped point circle (default: 5)
+    showGrid?: boolean;     // Show grid overlay (default: true)
+    showCrosshair?: boolean; // Show crosshair overlay (default: true)
+    enableInteractions?: boolean; // Mouse zoom/pan interactions (default: true)
+    enableWorker?: boolean; // Create streaming worker (default: true)
+    transparentBackground?: boolean; // Render transparent background (default: false)
 }
 
 /**
@@ -71,6 +76,7 @@ export class ErosChart {
     // === State ===
     private isStreaming = false;
     private animationFrameId: number | null = null;
+    private viewportChangeListener: ((startIndex: number, endIndex: number) => void) | null = null;
 
     // === Viewport (Zoom/Pan) ===
     private viewportStart = 0;
@@ -103,6 +109,11 @@ export class ErosChart {
             snapEnabled: options.snapEnabled ?? true,
             snapRadiusPx: options.snapRadiusPx ?? 14,
             snapIndicatorRadiusPx: options.snapIndicatorRadiusPx ?? 5,
+            showGrid: options.showGrid ?? true,
+            showCrosshair: options.showCrosshair ?? true,
+            enableInteractions: options.enableInteractions ?? true,
+            enableWorker: options.enableWorker ?? true,
+            transparentBackground: options.transparentBackground ?? false,
         };
     }
 
@@ -131,37 +142,46 @@ export class ErosChart {
         await this.renderer.initialize();
         this.renderer.setDataSource(this.ringBuffer);
         this.renderer.setLineColor(this.options.lineColor);  // Setze Linienfarbe
+        this.renderer.setTransparentBackground(this.options.transparentBackground);
 
         // ========== GRID OVERLAY ==========
-        this.gridOverlay = new GridOverlay(this.canvas);
+        if (this.options.showGrid) {
+            this.gridOverlay = new GridOverlay(this.canvas);
+        }
 
         // ========== CROSSHAIR OVERLAY ==========
-        this.crosshairOverlay = new CrosshairOverlay(
-            this.canvas,
-            this.ringBuffer,
-            this.options.sampleRate,
-            {
-                snapEnabled: this.options.snapEnabled,
-                snapRadiusPx: this.options.snapRadiusPx,
-                snapIndicatorRadiusPx: this.options.snapIndicatorRadiusPx,
-            }
-        );
+        if (this.options.showCrosshair) {
+            this.crosshairOverlay = new CrosshairOverlay(
+                this.canvas,
+                this.ringBuffer,
+                this.options.sampleRate,
+                {
+                    snapEnabled: this.options.snapEnabled,
+                    snapRadiusPx: this.options.snapRadiusPx,
+                    snapIndicatorRadiusPx: this.options.snapIndicatorRadiusPx,
+                }
+            );
+        }
 
         // ========== WEB WORKER ==========
         // Worker holt gRPC Daten im Hintergrund
-        this.worker = new Worker(
-            new URL('../worker/data.worker.ts', import.meta.url),
-            { type: 'module' }
-        );
+        if (this.options.enableWorker) {
+            this.worker = new Worker(
+                new URL('../worker/data.worker.ts', import.meta.url),
+                { type: 'module' }
+            );
 
-        // Schicke SharedArrayBuffer an Worker
-        this.worker.postMessage({
-            buffer: this.ringBuffer.buffer,
-            head: this.ringBuffer.head
-        });
+            // Schicke SharedArrayBuffer an Worker
+            this.worker.postMessage({
+                buffer: this.ringBuffer.buffer,
+                head: this.ringBuffer.head
+            });
+        }
 
         // ========== ZOOM & PAN ==========
-        this.setupInteractions();
+        if (this.options.enableInteractions) {
+            this.setupInteractions();
+        }
 
         // ========== RESIZE HANDLER ==========
         this.setupResize();
@@ -184,7 +204,7 @@ export class ErosChart {
         }
 
         if (!this.worker) {
-            throw new Error('ErosChart: initialize() wurde nicht aufgerufen!');
+            throw new Error('ErosChart: Streaming worker is disabled or initialize() was not called.');
         }
 
         const duration = options.duration ?? 30;
@@ -234,6 +254,8 @@ export class ErosChart {
                 viewport.maxValue
             );
         }
+
+        this.emitViewportChanged();
     }
 
     /**
@@ -243,6 +265,34 @@ export class ErosChart {
         this.viewportStart = 0;
         this.viewportEnd = this.options.bufferSize;
         this.renderer?.resetViewport();
+        this.emitViewportChanged();
+    }
+
+    public getViewportRange(): { startIndex: number; endIndex: number } {
+        return {
+            startIndex: this.viewportStart,
+            endIndex: this.viewportEnd,
+        };
+    }
+
+    public setViewportChangeListener(listener: ((startIndex: number, endIndex: number) => void) | null): void {
+        this.viewportChangeListener = listener;
+    }
+
+    public setLineColor(lineColor: string): void {
+        this.options.lineColor = lineColor;
+        this.renderer?.setLineColor(lineColor);
+    }
+
+    public setYRangeOverride(minValue: number, maxValue: number): void {
+        if (!Number.isFinite(minValue) || !Number.isFinite(maxValue) || minValue >= maxValue) {
+            return;
+        }
+        this.renderer?.setYRangeOverride(minValue, maxValue);
+    }
+
+    public clearYRangeOverride(): void {
+        this.renderer?.clearYRangeOverride();
     }
 
     /**
@@ -300,6 +350,7 @@ export class ErosChart {
         this.viewportStart = 0;
         this.viewportEnd = Math.max(sampleCount, 1);
         this.renderer.setViewport(this.viewportStart, this.viewportEnd);
+        this.emitViewportChanged();
 
         // Keep crosshair values coherent immediately after import, before next render frame.
         if (this.crosshairOverlay) {
@@ -378,6 +429,7 @@ export class ErosChart {
         if (this.animationFrameId !== null) {
             cancelAnimationFrame(this.animationFrameId);
         }
+        this.viewportChangeListener = null;
         this.crosshairOverlay?.destroy();
         this.gridOverlay?.destroy();
         this.worker?.terminate();
@@ -450,6 +502,8 @@ export class ErosChart {
                     viewport.maxValue
                 );
             }
+
+            this.emitViewportChanged();
         }, { passive: false });
 
         // ========== PAN (Drag) ==========
@@ -495,6 +549,8 @@ export class ErosChart {
                     viewport.maxValue
                 );
             }
+
+            this.emitViewportChanged();
         });
 
         window.addEventListener('mouseup', () => {
@@ -540,10 +596,11 @@ export class ErosChart {
                 if (currentHead > 0) {
                     // Min/Max vom Downsampler Ã¼bernehmen (statt eigener Loop!)
                     const dsResult = this.renderer?.getLastDownsampleResult();
-                    if (dsResult) {
+                    if (dsResult && this.renderer) {
+                        const viewport = this.renderer.getViewport();
                         this.gridOverlay?.draw(
-                            dsResult.globalMin,
-                            dsResult.globalMax,
+                            viewport.minValue,
+                            viewport.maxValue,
                             visibleSamples,
                             this.options.sampleRate,
                             start
@@ -593,6 +650,10 @@ export class ErosChart {
 
         new Float32Array(buffer, headerSize, values.length).set(values);
         return buffer;
+    }
+
+    private emitViewportChanged(): void {
+        this.viewportChangeListener?.(this.viewportStart, this.viewportEnd);
     }
 }
 
