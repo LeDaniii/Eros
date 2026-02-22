@@ -35,7 +35,8 @@ export interface ErosChartOptions {
     sampleRate?: number;    // Samples pro Sekunde (default: 10_000 = 10kHz)
     lineColor?: string;     // Linienfarbe als Hex (z.B. '#00ff00', default: grÃ¼n)
     snapEnabled?: boolean;  // Enable crosshair snapping (default: true)
-    snapRadiusPx?: number;  // Snap radius in pixels (default: 10)
+    snapRadiusPx?: number;  // Snap radius in pixels (default: 14)
+    snapIndicatorRadiusPx?: number; // Visual radius of snapped point circle (default: 5)
 }
 
 /**
@@ -100,7 +101,8 @@ export class ErosChart {
             sampleRate: options.sampleRate ?? 10_000,   // 10kHz
             lineColor: options.lineColor ?? '#00ff00',  // GrÃ¼n als Default
             snapEnabled: options.snapEnabled ?? true,
-            snapRadiusPx: options.snapRadiusPx ?? 10,
+            snapRadiusPx: options.snapRadiusPx ?? 14,
+            snapIndicatorRadiusPx: options.snapIndicatorRadiusPx ?? 5,
         };
     }
 
@@ -141,6 +143,7 @@ export class ErosChart {
             {
                 snapEnabled: this.options.snapEnabled,
                 snapRadiusPx: this.options.snapRadiusPx,
+                snapIndicatorRadiusPx: this.options.snapIndicatorRadiusPx,
             }
         );
 
@@ -375,6 +378,8 @@ export class ErosChart {
         if (this.animationFrameId !== null) {
             cancelAnimationFrame(this.animationFrameId);
         }
+        this.crosshairOverlay?.destroy();
+        this.gridOverlay?.destroy();
         this.worker?.terminate();
         console.log('ErosChart: ZerstÃ¶rt.');
     }
@@ -525,27 +530,41 @@ export class ErosChart {
             // WebGPU Rendering (jeden Frame)
             this.renderer?.render();
 
-            // Grid Update (nur alle 100ms, spart Performance)
-            if (now - lastGridUpdate > 100) {
+            // Grid update at ~30 FPS for responsive axis labels while zooming/panning.
+            if (now - lastGridUpdate > 33) {
                 const currentHead = this.ringBuffer!.currentHead;
+                const start = Math.max(0, this.viewportStart);
+                const end = Math.max(start + 1, Math.min(Math.max(currentHead, 1), this.viewportEnd));
+                const visibleSamples = Math.max(1, end - start);
 
                 if (currentHead > 0) {
                     // Min/Max vom Downsampler Ã¼bernehmen (statt eigener Loop!)
                     const dsResult = this.renderer?.getLastDownsampleResult();
                     if (dsResult) {
-                        const start = Math.max(0, this.viewportStart);
-                        const end = Math.min(currentHead, this.viewportEnd);
                         this.gridOverlay?.draw(
                             dsResult.globalMin,
                             dsResult.globalMax,
-                            end - start,
-                            this.options.sampleRate
+                            visibleSamples,
+                            this.options.sampleRate,
+                            start
                         );
                     } else {
-                        this.gridOverlay?.draw(-2.5, 2.5, this.options.bufferSize, this.options.sampleRate);
+                        this.gridOverlay?.draw(
+                            -2.5,
+                            2.5,
+                            visibleSamples,
+                            this.options.sampleRate,
+                            start
+                        );
                     }
                 } else {
-                    this.gridOverlay?.draw(-2.5, 2.5, this.options.bufferSize, this.options.sampleRate);
+                    this.gridOverlay?.draw(
+                        -2.5,
+                        2.5,
+                        this.options.bufferSize,
+                        this.options.sampleRate,
+                        0
+                    );
                 }
 
                 lastGridUpdate = now;

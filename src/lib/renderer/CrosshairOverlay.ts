@@ -6,7 +6,8 @@ export interface CrosshairOptions {
     lineWidth?: number;      // Line width (default: 1)
     fontSize?: number;       // Font size (default: 12)
     snapEnabled?: boolean;   // Snap to nearest point (default: true)
-    snapRadiusPx?: number;   // Snap radius in pixels (default: 10)
+    snapRadiusPx?: number;   // Snap radius in pixels (default: 14)
+    snapIndicatorRadiusPx?: number; // Visual radius of snapped point circle (default: 5)
 }
 
 interface SnapCandidate {
@@ -33,6 +34,7 @@ export class CrosshairOverlay {
     private fontSize: number;
     private snapEnabled: boolean;
     private snapRadiusPx: number;
+    private snapIndicatorRadiusPx: number;
 
     // Viewport info (updated from ErosChart)
     private viewport = {
@@ -66,7 +68,8 @@ export class CrosshairOverlay {
         this.lineWidth = options.lineWidth ?? 1;
         this.fontSize = options.fontSize ?? 12;
         this.snapEnabled = options.snapEnabled ?? true;
-        this.snapRadiusPx = options.snapRadiusPx ?? 10;
+        this.snapRadiusPx = options.snapRadiusPx ?? 14;
+        this.snapIndicatorRadiusPx = Math.max(0, options.snapIndicatorRadiusPx ?? 5);
 
         // Create canvas2D overlay above the WebGPU canvas
         this.canvas = document.createElement('canvas');
@@ -164,10 +167,10 @@ export class CrosshairOverlay {
         ctx.setLineDash([]);
 
         // Highlight snapped point
-        if (snap.snapped) {
+        if (snap.snapped && this.snapIndicatorRadiusPx > 0) {
             ctx.fillStyle = this.lineColor;
             ctx.beginPath();
-            ctx.arc(crosshairX, crosshairY, 3, 0, Math.PI * 2);
+            ctx.arc(crosshairX, crosshairY, this.snapIndicatorRadiusPx, 0, Math.PI * 2);
             ctx.fill();
         }
 

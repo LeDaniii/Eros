@@ -1,101 +1,208 @@
 /**
- * GridOverlay - Zeichnet Achsen, Beschriftungen und Grid
- *
- * WARUM Canvas2D hier statt WebGPU?
- * - WebGPU ist für VIELE Datenpunkte (Millionen)
- * - Grid hat nur ~20 Linien + Text
- * - Canvas2D ist einfacher für Text und UI-Elemente
- *
- * WIE funktioniert das Overlay?
- * - Zweiter Canvas über dem WebGPU Canvas (position: absolute)
- * - Transparent (pointerEvents: none)
- * - Wird nur bei Änderungen neu gezeichnet (nicht 60fps!)
+ * GridOverlay - draws axes, labels and grid on a Canvas2D overlay.
  */
 export class GridOverlay {
-    private overlayCanvas: HTMLCanvasElement;  // Separater Canvas für UI
-    private ctx: CanvasRenderingContext2D;     // Canvas2D Kontext (für Linien + Text)
+    private overlayCanvas: HTMLCanvasElement;
+    private ctx: CanvasRenderingContext2D;
+
+    private readonly leftPadding = 56;
+    private readonly rightPadding = 10;
+    private readonly topPadding = 8;
+    private readonly bottomPadding = 24;
 
     constructor(mainCanvas: HTMLCanvasElement) {
-        // Erstelle zweiten Canvas (liegt ÜBER dem WebGPU Canvas)
         this.overlayCanvas = document.createElement('canvas');
         this.overlayCanvas.width = mainCanvas.width;
         this.overlayCanvas.height = mainCanvas.height;
 
-        // CSS: Positioniere über WebGPU Canvas
         this.overlayCanvas.style.position = 'absolute';
         this.overlayCanvas.style.top = '0';
         this.overlayCanvas.style.left = '0';
-        this.overlayCanvas.style.pointerEvents = 'none';  // Klicks gehen durch zum WebGPU Canvas
+        this.overlayCanvas.style.pointerEvents = 'none';
 
-        // Füge in den gleichen Container ein
         mainCanvas.parentElement?.appendChild(this.overlayCanvas);
-        this.ctx = this.overlayCanvas.getContext('2d')!;
+
+        const ctx = this.overlayCanvas.getContext('2d');
+        if (!ctx) {
+            throw new Error('Canvas2D context is not available');
+        }
+        this.ctx = ctx;
     }
 
     /**
-     * Zeichnet Grid, Achsen und Beschriftungen
-     *
-     * @param minValue - Y-Achse Minimum (aus Auto-Scaling)
-     * @param maxValue - Y-Achse Maximum (aus Auto-Scaling)
-     * @param totalSamples - Anzahl sichtbarer Samples
-     * @param sampleRate - Samples pro Sekunde (z.B. 10000 = 10kHz)
+     * @param minValue min value for Y axis
+     * @param maxValue max value for Y axis
+     * @param totalSamples number of visible samples
+     * @param sampleRate samples per second
+     * @param startSampleIndex first visible sample, used as time offset
      */
-    draw(minValue: number, maxValue: number, totalSamples: number, sampleRate: number) {
+    draw(
+        minValue: number,
+        maxValue: number,
+        totalSamples: number,
+        sampleRate: number,
+        startSampleIndex = 0
+    ): void {
         const { width, height } = this.overlayCanvas;
-
-        // Lösche vorheriges Grid (sonst überlagern sich die Linien)
         this.ctx.clearRect(0, 0, width, height);
 
-        // Style Setup
-        this.ctx.strokeStyle = 'rgba(80, 80, 80, 0.4)';  // Graue, transparente Linien
+        if (width <= 0 || height <= 0) {
+            return;
+        }
+
+        const plotLeft = this.leftPadding;
+        const plotRight = Math.max(plotLeft + 1, width - this.rightPadding);
+        const plotTop = this.topPadding;
+        const plotBottom = Math.max(plotTop + 1, height - this.bottomPadding);
+        const plotWidth = Math.max(1, plotRight - plotLeft);
+        const plotHeight = Math.max(1, plotBottom - plotTop);
+
+        this.ctx.strokeStyle = 'rgba(80, 80, 80, 0.4)';
         this.ctx.lineWidth = 1;
-        this.ctx.fillStyle = '#aaa';                     // Hellgrau für Text
+        this.ctx.fillStyle = '#aaa';
         this.ctx.font = '11px monospace';
 
-        // ========== HORIZONTALE GRID-LINIEN (Y-Achse) ==========
-        const ySteps = 8;  // 8 Linien = 9 Bereiche
-        for (let i = 0; i <= ySteps; i++) {
-            const y = (height / ySteps) * i;  // Von oben nach unten
+        this.drawYGrid(minValue, maxValue, plotLeft, plotRight, plotTop, plotBottom, plotHeight);
+        this.drawXGrid(totalSamples, sampleRate, startSampleIndex, plotLeft, plotTop, plotBottom, plotWidth);
 
-            // Zeichne Grid-Linie
-            this.ctx.beginPath();
-            this.ctx.moveTo(50, y);      // Start: 50px vom linken Rand (Platz für Y-Labels)
-            this.ctx.lineTo(width, y);   // Ende: Rechter Rand
-            this.ctx.stroke();
-
-            // Y-Achsen Beschriftung (Messwerte)
-            // i=0 → maxValue (oben), i=ySteps → minValue (unten)
-            const value = maxValue - (maxValue - minValue) * (i / ySteps);
-            this.ctx.fillText(value.toFixed(2), 5, y + 4);  // Links neben der Linie
-        }
-
-        // ========== VERTIKALE GRID-LINIEN (X-Achse / Zeit) ==========
-        const xSteps = 10;  // 10 Linien = 11 Bereiche
-        const totalTime = totalSamples / sampleRate;  // Samples → Sekunden
-
-        for (let i = 0; i <= xSteps; i++) {
-            const x = 50 + ((width - 50) / xSteps) * i;  // Von links nach rechts
-
-            // Zeichne Grid-Linie
-            this.ctx.beginPath();
-            this.ctx.moveTo(x, 0);              // Start: Oben
-            this.ctx.lineTo(x, height - 20);    // Ende: 20px über unterem Rand (Platz für X-Labels)
-            this.ctx.stroke();
-
-            // X-Achsen Beschriftung (Zeit in Sekunden)
-            const time = (totalTime / xSteps) * i;
-            this.ctx.fillText(time.toFixed(1) + 's', x - 15, height - 5);  // Unter der Linie
-        }
-
-        // ========== ACHSEN-TITEL ==========
-        this.ctx.fillStyle = '#fff';                   // Weiß für Titel
+        this.ctx.fillStyle = '#fff';
         this.ctx.font = 'bold 12px sans-serif';
-        this.ctx.fillText('Value', 5, 15);            // Oben links
-        this.ctx.fillText('Time (s)', width - 60, height - 5);  // Unten rechts
+        this.ctx.textAlign = 'left';
+        this.ctx.textBaseline = 'top';
+        this.ctx.fillText('Value', 5, 5);
+        this.ctx.fillText('Time (s)', Math.max(plotLeft, width - 75), plotBottom + 6);
     }
 
-    resize(width: number, height: number) {
+    resize(width: number, height: number): void {
         this.overlayCanvas.width = width;
         this.overlayCanvas.height = height;
+    }
+
+    destroy(): void {
+        this.overlayCanvas.remove();
+    }
+
+    private drawYGrid(
+        minValue: number,
+        maxValue: number,
+        plotLeft: number,
+        plotRight: number,
+        plotTop: number,
+        plotBottom: number,
+        plotHeight: number
+    ): void {
+        const ySteps = 8;
+        this.ctx.textAlign = 'left';
+        this.ctx.textBaseline = 'middle';
+
+        for (let i = 0; i <= ySteps; i++) {
+            const y = plotTop + (plotHeight / ySteps) * i;
+
+            this.ctx.beginPath();
+            this.ctx.moveTo(plotLeft, y);
+            this.ctx.lineTo(plotRight, y);
+            this.ctx.stroke();
+
+            const value = maxValue - (maxValue - minValue) * (i / ySteps);
+            this.ctx.fillText(value.toFixed(2), 5, y);
+        }
+
+        this.ctx.beginPath();
+        this.ctx.moveTo(plotLeft, plotTop);
+        this.ctx.lineTo(plotLeft, plotBottom);
+        this.ctx.stroke();
+    }
+
+    private drawXGrid(
+        totalSamples: number,
+        sampleRate: number,
+        startSampleIndex: number,
+        plotLeft: number,
+        plotTop: number,
+        plotBottom: number,
+        plotWidth: number
+    ): void {
+        const safeSampleRate = Math.max(1, sampleRate);
+        const safeTotalSamples = Math.max(0, totalSamples);
+        const startTime = startSampleIndex / safeSampleRate;
+        const totalTime = safeTotalSamples / safeSampleRate;
+        const endTime = startTime + totalTime;
+
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = 'top';
+
+        if (totalTime <= 0) {
+            this.ctx.beginPath();
+            this.ctx.moveTo(plotLeft, plotTop);
+            this.ctx.lineTo(plotLeft, plotBottom);
+            this.ctx.stroke();
+            this.ctx.fillText(this.formatTimeSeconds(startTime, 1), plotLeft, plotBottom + 4);
+            return;
+        }
+
+        let desiredTickCount = Math.max(2, Math.floor(plotWidth / 90));
+        let tickStep = this.getNiceStep(totalTime / desiredTickCount);
+
+        const labelProbe = this.formatTimeSeconds(startTime + tickStep, tickStep);
+        const minLabelSpacing = this.ctx.measureText(labelProbe).width + 18;
+        desiredTickCount = Math.max(2, Math.floor(plotWidth / Math.max(1, minLabelSpacing)));
+        tickStep = this.getNiceStep(totalTime / desiredTickCount);
+
+        const firstTick = Math.ceil(startTime / tickStep) * tickStep;
+        const epsilon = tickStep * 1e-6;
+        const maxTicks = 1000;
+        let tickCount = 0;
+
+        for (let t = firstTick; t <= endTime + epsilon && tickCount < maxTicks; t += tickStep) {
+            const progress = (t - startTime) / totalTime;
+            if (progress < -0.001 || progress > 1.001) {
+                continue;
+            }
+
+            const x = plotLeft + progress * plotWidth;
+
+            this.ctx.beginPath();
+            this.ctx.moveTo(x, plotTop);
+            this.ctx.lineTo(x, plotBottom);
+            this.ctx.stroke();
+
+            this.ctx.fillText(this.formatTimeSeconds(t, tickStep), x, plotBottom + 4);
+            tickCount++;
+        }
+    }
+
+    private getNiceStep(rawStep: number): number {
+        if (!Number.isFinite(rawStep) || rawStep <= 0) {
+            return 1;
+        }
+
+        const exponent = Math.floor(Math.log10(rawStep));
+        const magnitude = 10 ** exponent;
+        const normalized = rawStep / magnitude;
+
+        if (normalized <= 1) {
+            return 1 * magnitude;
+        }
+        if (normalized <= 2) {
+            return 2 * magnitude;
+        }
+        if (normalized <= 5) {
+            return 5 * magnitude;
+        }
+        return 10 * magnitude;
+    }
+
+    private formatTimeSeconds(seconds: number, tickStep: number): string {
+        const absStep = Math.abs(tickStep);
+        if (!Number.isFinite(seconds) || !Number.isFinite(absStep)) {
+            return '0s';
+        }
+
+        if (absStep >= 1) {
+            return `${seconds.toFixed(1)}s`;
+        }
+
+        const decimals = Math.max(1, Math.min(6, Math.ceil(-Math.log10(absStep))));
+        return `${seconds.toFixed(decimals)}s`;
     }
 }
