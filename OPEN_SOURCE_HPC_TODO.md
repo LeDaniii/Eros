@@ -145,3 +145,159 @@ Date: 2026-02-19
 - [ ] Power-user analysis flow is usable end-to-end (cursor delta, markers, export, session restore).
 - [ ] API is documented, versioned, and OSS-ready.
 - [ ] CI/CD and release process are reproducible.
+
+---
+
+## 14. Industry-Grade Features
+
+Excludes: industrial protocols (Siemens, OPC UA, PROFINET, EtherCAT, Modbus, etc.)
+
+### 14.1 Multi-Axis / Split Pane Layout (P0)
+
+- [ ] Multiple Y-axes per chart (left + right, or N axes).
+- [ ] Per-curve axis assignment with independent scaling.
+- [ ] Split pane / sub-chart layout (vertically stacked panels sharing one X-axis).
+- [ ] Drag-and-drop curves between panes.
+- [ ] Configurable pane heights (drag dividers to resize).
+- [ ] Synchronized X-axis zoom/pan across all panes.
+- [ ] Independent Y-axis auto-scale per pane.
+
+### 14.2 Signal / Channel Tree (P0)
+
+- [ ] Hierarchical signal browser (tree view with groups/folders).
+- [ ] Drag-and-drop signals from tree into chart panes.
+- [ ] Signal metadata display (name, unit, sample rate, data type, source).
+- [ ] Search/filter signals by name, unit, or tag.
+- [ ] Favorite/pin frequently used signals.
+- [ ] Signal grouping (e.g., "Motor 1", "Temperature Sensors").
+
+### 14.3 Time Axis Formatting (P0)
+
+- [ ] Absolute timestamp axis (date + time with configurable format).
+- [ ] Relative time axis (seconds/minutes from trigger or recording start).
+- [ ] Auto-scale tick formatting: `ns` → `us` → `ms` → `s` → `min` → `h`.
+- [ ] Playback mode (animate viewport forward at configurable speed).
+- [ ] Scroll-through mode (arrow keys or mouse wheel to step through time).
+
+### 14.4 Cursor Readout Panel (P0)
+
+- [ ] Table showing `Signal | Value@A | Value@B | Delta | Unit` for all visible curves.
+- [ ] Cursor lock to specific curve for value readout.
+- [ ] Horizontal reference lines (draggable Y-thresholds with labels).
+
+### 14.5 Trigger & Search (P1)
+
+- [ ] Find next/previous point where `signal > threshold` (rising/falling edge).
+- [ ] Pattern search (spike, dropout, saturation).
+- [ ] Search results as navigable list with jump-to-time.
+- [ ] Highlight found regions on the chart.
+- [ ] Boolean trigger expressions (e.g., `signal_A > 5.0 AND signal_B < 1.0`).
+
+### 14.6 Math / Virtual Channels (P1)
+
+- [ ] Formula editor: virtual signals from expressions (e.g., `A - B`, `abs(A)`, `A * 0.5 + offset`).
+- [ ] Built-in math functions: `abs`, `sqrt`, `pow`, `log`, `sin`, `cos`, `min`, `max`, `clamp`.
+- [ ] Derivative (`dY/dt`) and integral channels.
+- [ ] Moving average / low-pass filter channel.
+- [ ] RMS calculation over configurable window.
+- [ ] Math channels render like normal curves (color, axis, visibility).
+
+### 14.7 FFT / Frequency Analysis (P1)
+
+- [ ] FFT of selected time window (configurable window size and overlap).
+- [ ] Magnitude spectrum display (linear and dB scale).
+- [ ] Spectrogram / waterfall view (frequency vs time heatmap).
+- [ ] Windowing functions: Hanning, Hamming, Blackman, Flat-Top, Rectangular.
+- [ ] Peak detection in frequency domain with frequency/amplitude readout.
+- [ ] Cursor-linked FFT (auto-update when cursor or viewport moves).
+
+### 14.8 Statistics Panel (P1)
+
+- [ ] Per-curve stats for visible range: `min`, `max`, `mean`, `RMS`, `std dev`, `peak-to-peak`.
+- [ ] Statistics table with all visible curves in rows.
+- [ ] Live update as viewport changes.
+- [ ] Optional: histogram view of value distribution.
+
+### 14.9 Line Style & Visual Customization (P0)
+
+- [ ] Line width (thin/medium/thick or pixel value).
+- [ ] Line style: solid, dashed, dotted.
+- [ ] Point markers at sample positions (circle, square, cross — when zoomed in).
+- [ ] Fill/area mode (fill between curve and zero or between two curves).
+- [ ] Step/staircase rendering mode (for digital/discrete signals).
+- [ ] Grid line style and density control.
+- [ ] Axis label formatting (engineering notation, scientific, fixed decimals).
+
+### 14.10 Data Import / Export (P0)
+
+- [ ] CSV import/export (configurable delimiter, header, timestamp format).
+- [ ] TDMS file import (NI LabVIEW standard format).
+- [ ] MDF/MF4 file import (ASAM standard, automotive).
+- [ ] HDF5 file import (scientific data).
+- [ ] Export selected time range (not just full recording).
+- [ ] PNG/SVG screenshot export (publication-quality with axes, labels, legend).
+- [ ] PDF report export (chart + statistics + metadata).
+- [ ] Clipboard copy of cursor values or statistics table.
+
+### 14.11 Print / Report Generation (P2)
+
+- [ ] Print layout configuration (page size, orientation, margins).
+- [ ] Multi-chart print layout (multiple views on one page).
+- [ ] Header/footer with metadata (recording name, date, operator, comments).
+- [ ] Batch report generation (template-based).
+
+### 14.12 Annotation & Range Markers (P0)
+
+- [ ] Range markers (highlighted time regions with color and label).
+- [ ] Text annotations anchored to (time, value) coordinates.
+- [ ] Marker management panel (list, edit, delete, jump-to).
+- [ ] Import/export markers (JSON or CSV).
+- [ ] Markers visible in overview/minimap.
+
+### 14.13 Layout & Workspace Management (P1)
+
+- [ ] Save/load workspace layouts (signals, panes, axis config, colors).
+- [ ] Layout templates for common use cases.
+- [ ] Tab-based multi-chart views.
+- [ ] Responsive layout (adapt to window resize, fullscreen mode).
+- [ ] Detachable/floating chart panels (pop out into separate window).
+
+### 14.14 Recording / Session Management (P1)
+
+- [ ] Recording browser (list sessions with metadata: date, duration, channel count, size).
+- [ ] Recording metadata editor (name, description, tags, operator notes).
+- [ ] Auto-save live recordings to disk (configurable trigger).
+- [ ] Recording segmentation (split long recordings into named segments).
+- [ ] Recording comparison (side-by-side or overlay of two recordings).
+
+### 14.15 Multi-Channel Scalability (P0)
+
+- [ ] Support `50+` channels simultaneously loaded in memory.
+- [ ] Lazy loading: only decode/render channels that are currently visible.
+- [ ] Channel enable/disable without unloading from memory.
+- [ ] Per-channel sample rate support (mixed rates, proper time alignment).
+- [ ] Efficient memory management (shared time axis, columnar storage).
+
+### 14.16 Alarm / Threshold Visualization (P2)
+
+- [ ] Configurable alarm thresholds per signal (upper/lower warning + critical).
+- [ ] Visual threshold bands on chart (colored zones: green/yellow/red).
+- [ ] Alarm event log (timestamp + signal + value + threshold crossed).
+- [ ] Color-code curve segments that exceed thresholds.
+- [ ] Alarm statistics (count, duration above threshold, first/last occurrence).
+
+### 14.17 Digital / Boolean Signal Support (P1)
+
+- [ ] Dedicated digital/boolean rendering (high/low states, not analog line).
+- [ ] Compact digital pane (multiple booleans stacked like a logic analyzer).
+- [ ] State label display ("ON"/"OFF", "OPEN"/"CLOSED" instead of 1/0).
+- [ ] Configurable state colors (green=ON, red=FAULT).
+- [ ] Edge counting and timing measurement for digital signals.
+
+### 14.18 Plugin / Extension System (P2)
+
+- [ ] Plugin API: register custom data sources, renderers, analysis tools.
+- [ ] Custom data source adapter interface (for proprietary formats).
+- [ ] Custom analysis plugin interface (run user code on visible data range).
+- [ ] Custom visualization plugin (render overlays on chart canvas).
+- [ ] Plugin discovery and loading mechanism.
