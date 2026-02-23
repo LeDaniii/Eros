@@ -82,6 +82,22 @@ Date: 2026-02-19
 - [ ] `P1`: Add optional event markers / trigger markers for live testing workflows (e.g. probe/taster touch events).
 - [ ] `P1`: Add seamless handoff from frozen live view to investigation tools (crosshair/cursors on the same time window).
 
+### 5.2 Always-On Digital Input Stream MVP (P0) (truthy/falsy -> Live Strip)
+
+- [ ] `P0`: Add a demo server stream for digital state changes (`truthy/falsy`) with timestamped messages (Node server -> frontend).
+- [ ] `P0`: Add a dedicated frontend worker for an always-on stream connection (MVP: separate worker is acceptable).
+- [ ] `P0`: Define worker lifecycle independent of chart instances (connect once, keep receiving while UI mode changes).
+- [ ] `P0`: Keep a ring buffer for live history (required for `Freeze`, `Resume`, and export; do not render-only-and-drop).
+- [ ] `P0`: Implement event-to-sample rasterization in the worker (`0/1`, fixed rate, hold-last-value) for first digital MVP.
+- [ ] `P0`: Forward worker updates to the main thread with minimal UI overhead (batched updates / shared memory path where useful).
+- [ ] `P0`: Bind `Live Strip` chart mode to the always-on digital stream buffer (follow latest by default).
+- [ ] `P0`: Ensure manual interaction (`zoom/pan`) freezes follow mode while the stream continues ingesting in the background.
+- [ ] `P0`: Add basic live state readout in UI (`TRUE/FALSE`, last update timestamp, connection state).
+- [ ] `P0`: Export buffered live data (at least current buffer/time window) so live tests can be saved after `Freeze`.
+- [ ] `P0`: Reconnect behavior for the always-on digital worker stream (backoff/jitter, stale-connection indicator).
+- [ ] `P0`: Document MVP constraint: digital stream is rasterized to analog-like `0/1` samples first; native event rendering comes later.
+- [ ] `P1`: Consolidate multiple live streams into one multiplexed worker/runtime (replace separate MVP worker if needed).
+
 ## 6. OSS API Design (P0)
 
 - [ ] Keep a stable public API (`ErosChart`) for both modes.

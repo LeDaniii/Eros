@@ -2,7 +2,7 @@
  * Demo app for Eros Charts
  */
 
-import { ErosChart, type ErosBinaryCurve } from './lib/api/ErosChart';
+import { ErosChart, type ErosBinaryCurve, type ErosChartDisplayMode } from './lib/api/ErosChart';
 
 // ==========================================
 // GLOBAL STATE
@@ -23,6 +23,14 @@ interface ImportedBinaryEntry {
 }
 
 let importedBinaryEntries: ImportedBinaryEntry[] = [];
+
+const displayModePreferences: {
+    mode: ErosChartDisplayMode;
+    liveWindowSeconds: number;
+} = {
+    mode: 'analysis',
+    liveWindowSeconds: 10,
+};
 
 const DEFAULT_GRPC_URL = 'http://localhost:50051';
 const EROS_BINARY_EXTENSION = '.erosb';
@@ -77,6 +85,35 @@ function createControlPanel(): HTMLDivElement {
                 style="width: 100%; padding: 8px; background: #444; color: #0f0; border: 1px solid #0f0; cursor: pointer; font-weight: bold; font-size: 12px; border-radius: 5px;">
             RESET ZOOM
         </button>
+        <div style="margin-top: 10px; border: 1px solid #2f4f2f; border-radius: 6px; padding: 8px; background: rgba(15, 30, 15, 0.55);">
+            <div style="font-size: 11px; color: #9de89d; margin-bottom: 6px; font-weight: bold;">DISPLAY MODE</div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+                <button id="displayModeAnalysisBtn"
+                        style="padding: 6px; background: #0f0; color: #000; border: 1px solid #0f0; cursor: pointer; font-weight: bold; font-size: 11px; border-radius: 4px;">
+                    ANALYSIS
+                </button>
+                <button id="displayModeLiveStripBtn"
+                        style="padding: 6px; background: #1f1f1f; color: #c8ffc8; border: 1px solid #3f6f3f; cursor: pointer; font-weight: bold; font-size: 11px; border-radius: 4px;">
+                    LIVE STRIP
+                </button>
+            </div>
+            <div style="display:flex; gap:6px; margin-top:6px; align-items:center;">
+                <label for="liveWindowSelect" style="font-size:10px; color:#9fb79f;">Window</label>
+                <select id="liveWindowSelect"
+                        style="flex:1; min-width:0; padding:4px; background:#182218; color:#d7ffd7; border:1px solid #2f5f2f; font-family:monospace; font-size:11px;">
+                    <option value="5">5s</option>
+                    <option value="10" selected>10s</option>
+                    <option value="30">30s</option>
+                </select>
+                <button id="liveFreezeBtn"
+                        style="padding:4px 8px; background:#222; color:#888; border:1px solid #444; cursor:pointer; font-weight:bold; font-size:10px; border-radius:4px;">
+                    FREEZE
+                </button>
+            </div>
+            <div id="liveModeInfo" style="margin-top: 6px; font-size: 10px; color: #83a383; line-height: 1.2;">
+                Mode: no chart
+            </div>
+        </div>
         <button id="downloadBinaryBtn"
                 style="width: 100%; margin-top: 8px; padding: 8px; background: #1f5f1f; color: #d5ffd5; border: 1px solid #0f0; cursor: pointer; font-weight: bold; font-size: 12px; border-radius: 5px;">
             DOWNLOAD .EROSB
@@ -147,6 +184,69 @@ function updateDataStats(): void {
     }
 }
 
+function applyDisplayModePreferencesToChart(targetChart: ErosChart): void {
+    targetChart.setLiveWindowDuration(displayModePreferences.liveWindowSeconds);
+    targetChart.setDisplayMode(displayModePreferences.mode);
+
+    if (displayModePreferences.mode === 'live-strip') {
+        targetChart.resumeFollowLatest();
+    } else {
+        targetChart.setFollowLatest(false);
+    }
+}
+
+function refreshDisplayModeControls(): void {
+    const analysisBtn = document.getElementById('displayModeAnalysisBtn') as HTMLButtonElement | null;
+    const liveStripBtn = document.getElementById('displayModeLiveStripBtn') as HTMLButtonElement | null;
+    const liveWindowSelect = document.getElementById('liveWindowSelect') as HTMLSelectElement | null;
+    const freezeBtn = document.getElementById('liveFreezeBtn') as HTMLButtonElement | null;
+    const strategyInfo = document.getElementById('liveModeInfo') as HTMLDivElement | null;
+
+    if (!analysisBtn || !liveStripBtn || !liveWindowSelect || !freezeBtn || !strategyInfo) {
+        return;
+    }
+
+    const hasChart = chart !== null;
+    const strategyState = chart?.getViewportStrategyState() ?? {
+        displayMode: displayModePreferences.mode,
+        followLatest: false,
+        liveWindowDurationSeconds: displayModePreferences.liveWindowSeconds,
+        isFrozen: false,
+    };
+
+    liveWindowSelect.value = String(displayModePreferences.liveWindowSeconds);
+
+    const setModeButtonStyle = (btn: HTMLButtonElement, active: boolean): void => {
+        btn.style.background = active ? '#0f0' : '#1f1f1f';
+        btn.style.color = active ? '#000' : '#c8ffc8';
+        btn.style.borderColor = active ? '#0f0' : '#3f6f3f';
+    };
+
+    setModeButtonStyle(analysisBtn, strategyState.displayMode === 'analysis');
+    setModeButtonStyle(liveStripBtn, strategyState.displayMode === 'live-strip');
+
+    analysisBtn.disabled = !hasChart;
+    liveStripBtn.disabled = !hasChart;
+    liveWindowSelect.disabled = !hasChart;
+
+    const liveStripActive = hasChart && strategyState.displayMode === 'live-strip';
+    freezeBtn.disabled = !liveStripActive;
+    freezeBtn.textContent = liveStripActive && strategyState.isFrozen ? 'RESUME FOLLOW' : 'FREEZE';
+    freezeBtn.style.background = liveStripActive
+        ? (strategyState.isFrozen ? '#1f5f1f' : '#4f2f1f')
+        : '#222';
+    freezeBtn.style.color = liveStripActive
+        ? (strategyState.isFrozen ? '#d5ffd5' : '#ffd9c7')
+        : '#888';
+    freezeBtn.style.borderColor = liveStripActive
+        ? (strategyState.isFrozen ? '#0f0' : '#ff9d6b')
+        : '#444';
+
+    strategyInfo.textContent = hasChart
+        ? `Mode: ${strategyState.displayMode} | Follow: ${strategyState.followLatest ? 'on' : 'off'} | Window: ${strategyState.liveWindowDurationSeconds}s`
+        : 'Mode: no chart';
+}
+
 async function createOrReplaceChart(sampleRate: number, bufferSize: number): Promise<ErosChart> {
     destroyBinaryOverlayCharts();
 
@@ -168,7 +268,9 @@ async function createOrReplaceChart(sampleRate: number, bufferSize: number): Pro
     });
 
     await nextChart.initialize();
+    applyDisplayModePreferencesToChart(nextChart);
     chart = nextChart;
+    refreshDisplayModeControls();
     return nextChart;
 }
 
@@ -384,6 +486,7 @@ async function createOrReplaceBinaryCompareCharts(entries: ImportedBinaryEntry[]
     });
     await primaryChart.initialize();
     primaryChart.loadData(entries[0].decoded.values);
+    applyDisplayModePreferencesToChart(primaryChart);
     primaryChart.setViewportChangeListener(() => {
         scheduleBinaryCompareSync();
     });
@@ -413,11 +516,13 @@ async function createOrReplaceBinaryCompareCharts(entries: ImportedBinaryEntry[]
 
     applyBinaryCurveStyles();
     scheduleBinaryCompareSync();
+    refreshDisplayModeControls();
 }
 
 // Update stats every 200ms
 setInterval(() => {
     if (chart) updateDataStats();
+    refreshDisplayModeControls();
 }, 200);
 
 // ==========================================
@@ -437,6 +542,10 @@ function setupButtonHandlers(): void {
     const binaryFileSelect = document.getElementById('binaryFileSelect') as HTMLSelectElement;
     const durationInput = document.getElementById('durationInput') as HTMLInputElement;
     const sampleRateInput = document.getElementById('sampleRateInput') as HTMLInputElement;
+    const displayModeAnalysisBtn = document.getElementById('displayModeAnalysisBtn') as HTMLButtonElement;
+    const displayModeLiveStripBtn = document.getElementById('displayModeLiveStripBtn') as HTMLButtonElement;
+    const liveWindowSelect = document.getElementById('liveWindowSelect') as HTMLSelectElement;
+    const liveFreezeBtn = document.getElementById('liveFreezeBtn') as HTMLButtonElement;
 
     const resetStartButtonState = (): void => {
         startBtn.disabled = false;
@@ -529,6 +638,70 @@ function setupButtonHandlers(): void {
 
     binaryBrowserInfo.addEventListener('input', (event) => {
         handleBinaryCurveControlChange(event.target, false);
+    });
+
+    displayModeAnalysisBtn.addEventListener('click', () => {
+        displayModePreferences.mode = 'analysis';
+        chart?.setDisplayMode('analysis');
+        refreshDisplayModeControls();
+        if (chart) {
+            updateStatus('Display mode: analysis');
+        }
+    });
+
+    displayModeLiveStripBtn.addEventListener('click', () => {
+        const selectedWindow = Number.parseFloat(liveWindowSelect.value);
+        if (Number.isFinite(selectedWindow) && selectedWindow > 0) {
+            displayModePreferences.liveWindowSeconds = selectedWindow;
+        }
+        displayModePreferences.mode = 'live-strip';
+
+        if (chart) {
+            chart.setLiveWindowDuration(displayModePreferences.liveWindowSeconds);
+            chart.setDisplayMode('live-strip');
+            chart.resumeFollowLatest();
+            updateStatus(`Display mode: live strip (${displayModePreferences.liveWindowSeconds}s window)`);
+        }
+        refreshDisplayModeControls();
+    });
+
+    liveWindowSelect.addEventListener('change', () => {
+        const selectedWindow = Number.parseFloat(liveWindowSelect.value);
+        if (!Number.isFinite(selectedWindow) || selectedWindow <= 0) {
+            liveWindowSelect.value = String(displayModePreferences.liveWindowSeconds);
+            return;
+        }
+
+        displayModePreferences.liveWindowSeconds = selectedWindow;
+        if (chart) {
+            chart.setLiveWindowDuration(selectedWindow);
+            const strategy = chart.getViewportStrategyState();
+            if (strategy.displayMode === 'live-strip' && strategy.followLatest && !strategy.isFrozen) {
+                chart.resumeFollowLatest();
+            }
+            updateStatus(`Live strip window set to ${selectedWindow}s`);
+        }
+        refreshDisplayModeControls();
+    });
+
+    liveFreezeBtn.addEventListener('click', () => {
+        if (!chart) {
+            return;
+        }
+
+        const strategy = chart.getViewportStrategyState();
+        if (strategy.displayMode !== 'live-strip') {
+            return;
+        }
+
+        if (strategy.isFrozen) {
+            chart.resumeFollowLatest();
+            updateStatus('Live strip follow resumed');
+        } else {
+            chart.freeze();
+            updateStatus('Live strip frozen');
+        }
+        refreshDisplayModeControls();
     });
 
 
@@ -690,6 +863,7 @@ function setupButtonHandlers(): void {
     });
 
     renderBinaryBrowser();
+    refreshDisplayModeControls();
 }
 
 // ==========================================

@@ -561,6 +561,7 @@ export class ErosChart {
         // ========== ZOOM (Mausrad) ==========
         this.canvas.addEventListener('wheel', (e) => {
             e.preventDefault();
+            this.freezeLiveStripForManualViewportInteraction();
 
             const rect = this.canvas.getBoundingClientRect();
             const mouseX = (e.clientX - rect.left) / rect.width;  // 0..1
@@ -611,6 +612,7 @@ export class ErosChart {
 
         window.addEventListener('mousemove', (e) => {
             if (!isDragging) return;
+            this.freezeLiveStripForManualViewportInteraction();
 
             const rect = this.canvas.getBoundingClientRect();
             const deltaX = e.clientX - dragStartX;
@@ -730,8 +732,7 @@ export class ErosChart {
     }
 
     /**
-     * Foundation hook for display-mode-dependent viewport policies.
-     * Live-strip fixed-window follow behavior is added in the next implementation slice.
+     * Display-mode-dependent viewport policy hook (e.g. live-strip follow-latest).
      */
     private applyViewportStrategyFrame(): void {
         if (this.displayMode !== 'live-strip') {
@@ -742,8 +743,53 @@ export class ErosChart {
             return;
         }
 
-        // Intentionally no-op for now:
-        // ticket 2 will compute and apply the fixed-duration follow-latest viewport here.
+        if (!this.ringBuffer || !this.renderer) {
+            return;
+        }
+
+        const nextViewport = this.computeLiveStripFollowLatestViewport(this.ringBuffer.currentHead);
+        if (
+            nextViewport.startIndex === this.viewportStart &&
+            nextViewport.endIndex === this.viewportEnd
+        ) {
+            return;
+        }
+
+        this.setViewport(nextViewport.startIndex, nextViewport.endIndex);
+    }
+
+    private freezeLiveStripForManualViewportInteraction(): void {
+        if (this.displayMode !== 'live-strip') {
+            return;
+        }
+
+        if (this.viewportStrategy.isFrozen) {
+            return;
+        }
+
+        this.freeze();
+    }
+
+    private computeLiveStripFollowLatestViewport(currentHead: number): { startIndex: number; endIndex: number } {
+        const safeCurrentHead = Math.max(0, Math.min(currentHead, this.options.bufferSize));
+        const safeSampleRate = Math.max(1, this.options.sampleRate);
+        const requestedWindowSamples = Math.round(this.viewportStrategy.liveWindowDurationSeconds * safeSampleRate);
+        const windowSamples = Math.max(1, Math.min(this.options.bufferSize, requestedWindowSamples));
+
+        if (safeCurrentHead <= 0) {
+            return {
+                startIndex: 0,
+                endIndex: 1,
+            };
+        }
+
+        const endIndex = Math.max(1, safeCurrentHead);
+        const startIndex = Math.max(0, endIndex - windowSamples);
+
+        return {
+            startIndex,
+            endIndex: Math.max(startIndex + 1, endIndex),
+        };
     }
 
     private static encodeBinary(values: Float32Array, sampleRate: number): ArrayBuffer {
