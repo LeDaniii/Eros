@@ -27,6 +27,7 @@
 
 import { SharedRingBuffer } from "../core/SharedRingBuffer";
 import { Downsampler, DownsampleResult } from "../core/Downsampler";
+import { PLOT_PADDING, getPlotRect } from './plotLayout';
 
 interface Viewport {
     minValue: number;    // Y-Achse Minimum (für Auto-Scaling)
@@ -148,7 +149,8 @@ export class WebGPURenderer {
         });
 
         // Kleiner Buffer für Downsampled Mode (2 floats pro Pixel)
-        const maxDownsampledSize = this.canvas.width * 2 * 4;
+        const plotWidth = getPlotRect(this.canvas.width, this.canvas.height).width;
+        const maxDownsampledSize = plotWidth * 2 * 4;
         this.downsampledBuffer = this.device.createBuffer({
             size: Math.max(maxDownsampledSize, 256),
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -181,7 +183,7 @@ export class WebGPURenderer {
         });
 
         // Downsampler initialisieren
-        this.downsampler = new Downsampler(this.canvas.width);
+        this.downsampler = new Downsampler(plotWidth);
     }
 
     async initialize() {
@@ -272,6 +274,11 @@ export class WebGPURenderer {
      * - X-Position: floor(vertex_index / 2) / bucketCount (Min+Max teilen sich X)
      */
     private getWGSLCode(): string {
+        const plotLeftPx = `${PLOT_PADDING.left}.0`;
+        const plotRightPaddingPx = `${PLOT_PADDING.right}.0`;
+        const plotTopPx = `${PLOT_PADDING.top}.0`;
+        const plotBottomPaddingPx = `${PLOT_PADDING.bottom}.0`;
+
         return `
         struct Uniforms {
             resolution: vec2<f32>,  // Canvas-Größe (width, height)
@@ -300,26 +307,37 @@ export class WebGPURenderer {
             let dataIndex = select(u32(uniforms.startIndex) + idx, idx, uniforms.mode > 0.5);
             let val = data[dataIndex];
 
-            var x: f32;
+            let plotLeftPx = ${plotLeftPx};
+            let plotRightPx = max(plotLeftPx + 1.0, uniforms.resolution.x - ${plotRightPaddingPx});
+            let plotTopPx = ${plotTopPx};
+            let plotBottomPx = max(plotTopPx + 1.0, uniforms.resolution.y - ${plotBottomPaddingPx});
+            let plotWidthPx = max(1.0, plotRightPx - plotLeftPx);
+            let plotHeightPx = max(1.0, plotBottomPx - plotTopPx);
+
+            var normalizedX: f32;
 
             if (uniforms.mode < 0.5) {
                 // === EXACT MODE ===
                 let visibleCount = uniforms.endIndex - uniforms.startIndex;
-                let normalizedX = f32(idx) / visibleCount;
-                x = normalizedX * 2.0 - 1.0;
+                normalizedX = f32(idx) / visibleCount;
             } else {
                 // === DOWNSAMPLED MODE ===
                 // [min0, max0, min1, max1, ...] → Min+Max teilen sich X-Position
                 let bucketCount = uniforms.vertexCount / 2.0;
                 let bucketIndex = f32(idx / 2u);
-                let normalizedX = (bucketIndex + 0.5) / bucketCount;
-                x = normalizedX * 2.0 - 1.0;
+                normalizedX = (bucketIndex + 0.5) / bucketCount;
             }
 
             // Y-Position: gleich für beide Modi (Auto-Scaling)
+            let xPx = plotLeftPx + normalizedX * plotWidthPx;
+            let x = (xPx / uniforms.resolution.x) * 2.0 - 1.0;
+
             let valueRange = uniforms.maxValue - uniforms.minValue;
             let normalizedY = (val - uniforms.minValue) / valueRange;
-            let y = (normalizedY * 2.0 - 1.0) * 0.95;
+            let yNdcInPlot = (normalizedY * 2.0 - 1.0) * 0.95;
+            let yPlot01 = 1.0 - (yNdcInPlot * 0.5 + 0.5);
+            let yPx = plotTopPx + yPlot01 * plotHeightPx;
+            let y = 1.0 - 2.0 * (yPx / uniforms.resolution.y);
 
             out.position = vec4<f32>(x, y, 0.0, 1.0);
             out.color = uniforms.lineColor;
@@ -373,11 +391,12 @@ export class WebGPURenderer {
         this.updateViewport();
 
         // === DOWNSAMPLING ENTSCHEIDUNG ===
+        const plotWidth = getPlotRect(this.canvas.width, this.canvas.height).width;
         const result = this.downsampler.process(
             this.ringBuffer.data,
             this.viewport.startIndex,
             this.viewport.endIndex,
-            this.canvas.width
+            plotWidth
         );
         this.lastDownsampleResult = result;
 
@@ -466,13 +485,14 @@ export class WebGPURenderer {
         this.createMSAATexture();
 
         // Downsampler Buffer anpassen
-        this.downsampler?.onResize(width);
+        const plotWidth = getPlotRect(width, height).width;
+        this.downsampler?.onResize(plotWidth);
 
         // GPU Buffer für Downsampled Mode neu erstellen
         if (this.device && this.pipeline && this.uniformBuffer) {
             this.downsampledBuffer?.destroy();
             this.downsampledBuffer = this.device.createBuffer({
-                size: Math.max(width * 2 * 4, 256),
+                size: Math.max(plotWidth * 2 * 4, 256),
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             });
 

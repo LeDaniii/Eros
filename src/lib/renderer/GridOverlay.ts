@@ -1,14 +1,11 @@
 /**
  * GridOverlay - draws axes, labels and grid on a Canvas2D overlay.
  */
+import { getPlotRect } from './plotLayout';
+
 export class GridOverlay {
     private overlayCanvas: HTMLCanvasElement;
     private ctx: CanvasRenderingContext2D;
-
-    private readonly leftPadding = 56;
-    private readonly rightPadding = 10;
-    private readonly topPadding = 8;
-    private readonly bottomPadding = 24;
 
     constructor(mainCanvas: HTMLCanvasElement) {
         this.overlayCanvas = document.createElement('canvas');
@@ -51,12 +48,13 @@ export class GridOverlay {
             return;
         }
 
-        const plotLeft = this.leftPadding;
-        const plotRight = Math.max(plotLeft + 1, width - this.rightPadding);
-        const plotTop = this.topPadding;
-        const plotBottom = Math.max(plotTop + 1, height - this.bottomPadding);
-        const plotWidth = Math.max(1, plotRight - plotLeft);
-        const plotHeight = Math.max(1, plotBottom - plotTop);
+        const plot = getPlotRect(width, height);
+        const plotLeft = plot.left;
+        const plotRight = plot.right;
+        const plotTop = plot.top;
+        const plotBottom = plot.bottom;
+        const plotWidth = plot.width;
+        const plotHeight = plot.height;
 
         this.ctx.strokeStyle = 'rgba(80, 80, 80, 0.4)';
         this.ctx.lineWidth = 1;

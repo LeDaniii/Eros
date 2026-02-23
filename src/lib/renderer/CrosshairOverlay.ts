@@ -1,4 +1,5 @@
 import { SharedRingBuffer } from '../core/SharedRingBuffer';
+import { getPlotRect, type PlotRect } from './plotLayout';
 
 export interface CrosshairOptions {
     lineColor?: string;      // Crosshair line color (default: '#00ff00')
@@ -161,6 +162,11 @@ export class CrosshairOverlay {
         const ctx = this.ctx;
         const width = this.canvas.width;
         const height = this.canvas.height;
+        const plot = this.getPlotRect();
+
+        if (this.mouseX < plot.left || this.mouseX > plot.right || this.mouseY < plot.top || this.mouseY > plot.bottom) {
+            return;
+        }
 
         const snap = this.getSnapCandidate(this.mouseX, this.mouseY);
         const crosshairX = snap.x;
@@ -180,10 +186,10 @@ export class CrosshairOverlay {
         ctx.setLineDash([5, 5]);
 
         ctx.beginPath();
-        ctx.moveTo(crosshairX, 0);
-        ctx.lineTo(crosshairX, height);
-        ctx.moveTo(0, crosshairY);
-        ctx.lineTo(width, crosshairY);
+        ctx.moveTo(crosshairX, plot.top);
+        ctx.lineTo(crosshairX, plot.bottom);
+        ctx.moveTo(plot.left, crosshairY);
+        ctx.lineTo(plot.right, crosshairY);
         ctx.stroke();
 
         ctx.setLineDash([]);
@@ -241,7 +247,7 @@ export class CrosshairOverlay {
             return fallback;
         }
 
-        const width = this.canvas.width;
+        const width = this.getPlotRect().width;
         const viewportSpan = Math.max(1, this.viewport.endIndex - this.viewport.startIndex);
         const snapSeries = this.getSnapSeries();
 
@@ -368,12 +374,12 @@ export class CrosshairOverlay {
     }
 
     private getSampleIndexAtX(x: number): number {
-        const width = this.canvas.width;
-        if (width <= 0) {
+        const plot = this.getPlotRect();
+        if (plot.width <= 0) {
             return this.viewport.startIndex;
         }
 
-        const progress = this.clamp(x / width, 0, 1);
+        const progress = this.clamp((x - plot.left) / plot.width, 0, 1);
         return this.viewport.startIndex + progress * (this.viewport.endIndex - this.viewport.startIndex);
     }
 
@@ -418,20 +424,25 @@ export class CrosshairOverlay {
         return count;
     }
 
+    private getPlotRect(): PlotRect {
+        return getPlotRect(this.canvas.width, this.canvas.height);
+    }
+
     private sampleIndexToCanvasX(index: number): number {
-        const width = this.canvas.width;
+        const plot = this.getPlotRect();
         const visibleCount = this.viewport.endIndex - this.viewport.startIndex;
 
-        if (width <= 0 || visibleCount <= 0) {
-            return 0;
+        if (plot.width <= 0 || visibleCount <= 0) {
+            return plot.left;
         }
 
         const normalizedX = (index - this.viewport.startIndex) / visibleCount;
-        return normalizedX * width;
+        return plot.left + normalizedX * plot.width;
     }
 
     /** Match renderer Y transform including 5% top/bottom padding from shader */
     private valueToCanvasY(value: number): number {
+        const plot = this.getPlotRect();
         const height = this.canvas.height;
         const range = this.viewport.maxValue - this.viewport.minValue;
 
@@ -441,9 +452,10 @@ export class CrosshairOverlay {
 
         const normalizedY = (value - this.viewport.minValue) / range;
         const ndcY = (normalizedY * 2 - 1) * 0.95;
-        const screenY = (1 - (ndcY * 0.5 + 0.5)) * height;
+        const plotY = (1 - (ndcY * 0.5 + 0.5)) * plot.height;
+        const screenY = plot.top + plotY;
 
-        return this.clamp(screenY, 0, height);
+        return this.clamp(screenY, plot.top, plot.bottom);
     }
 
     private clamp(value: number, min: number, max: number): number {
