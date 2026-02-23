@@ -295,6 +295,10 @@ export class ErosChart {
         this.renderer?.clearYRangeOverride();
     }
 
+    public setCrosshairSnapSeries(series: Array<{ values: ArrayLike<number>; visible?: boolean; color?: string }> | null): void {
+        this.crosshairOverlay?.setSnapSeries(series);
+    }
+
     /**
      * Gibt aktuelle Statistiken zurÃ¼ck
      */

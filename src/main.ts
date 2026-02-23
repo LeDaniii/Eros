@@ -259,6 +259,22 @@ function applyBinaryCurveStyles(): void {
             overlayCanvas.style.opacity = entry.visible ? '1' : '0';
         }
     }
+
+    updateBinaryCrosshairSnapSeries();
+}
+
+function updateBinaryCrosshairSnapSeries(): void {
+    if (!chart || currentViewMode !== 'binary' || importedBinaryEntries.length === 0) {
+        return;
+    }
+
+    chart.setCrosshairSnapSeries(
+        importedBinaryEntries.map((entry) => ({
+            values: entry.decoded.values,
+            visible: entry.visible,
+            color: entry.color,
+        }))
+    );
 }
 
 function computeSharedBinaryYRange(startIndex: number, endIndex: number): { min: number; max: number } | null {

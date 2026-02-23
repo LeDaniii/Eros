@@ -16,6 +16,13 @@ interface SnapCandidate {
     y: number;
     sampleIndex: number;
     value: number;
+    color: string | null;
+}
+
+interface SnapSeries {
+    values: ArrayLike<number>;
+    visible: boolean;
+    color?: string;
 }
 
 export class CrosshairOverlay {
@@ -35,6 +42,7 @@ export class CrosshairOverlay {
     private snapEnabled: boolean;
     private snapRadiusPx: number;
     private snapIndicatorRadiusPx: number;
+    private customSnapSeries: SnapSeries[] | null = null;
 
     // Viewport info (updated from ErosChart)
     private viewport = {
@@ -115,6 +123,20 @@ export class CrosshairOverlay {
         this.viewport.maxValue = maxValue;
     }
 
+    /** Override snap candidates (e.g. multi-curve overlays). Null resets to primary buffer only. */
+    public setSnapSeries(series: Array<{ values: ArrayLike<number>; visible?: boolean; color?: string }> | null): void {
+        if (!series || series.length === 0) {
+            this.customSnapSeries = null;
+            return;
+        }
+
+        this.customSnapSeries = series.map((entry) => ({
+            values: entry.values,
+            visible: entry.visible ?? true,
+            color: entry.color,
+        }));
+    }
+
     private onMouseMove(event: MouseEvent): void {
         const rect = this.parentCanvas.getBoundingClientRect();
         this.mouseX = event.clientX - rect.left;
@@ -166,9 +188,14 @@ export class CrosshairOverlay {
 
         ctx.setLineDash([]);
 
-        // Highlight snapped point
-        if (snap.snapped && this.snapIndicatorRadiusPx > 0) {
-            ctx.fillStyle = this.lineColor;
+        const isMultiCurveSnapMode = this.customSnapSeries !== null;
+        const showSnapHighlight = snap.snapped
+            && this.snapIndicatorRadiusPx > 0
+            && (!isMultiCurveSnapMode || this.getVisibleSnapSeriesCount() > 1);
+
+        // In multi-curve mode, color the marker by the snapped curve; otherwise keep the default marker color.
+        if (showSnapHighlight) {
+            ctx.fillStyle = isMultiCurveSnapMode ? (snap.color ?? this.lineColor) : this.lineColor;
             ctx.beginPath();
             ctx.arc(crosshairX, crosshairY, this.snapIndicatorRadiusPx, 0, Math.PI * 2);
             ctx.fill();
@@ -197,7 +224,8 @@ export class CrosshairOverlay {
 
     /** Compute nearest snap point in a local search window around cursor x */
     private getSnapCandidate(mouseX: number, mouseY: number): SnapCandidate {
-        const fallbackValue = this.getInterpolatedValueAtX(mouseX);
+        const fallbackSeries = this.getFallbackSeriesValues();
+        const fallbackValue = this.getInterpolatedValueAtX(mouseX, fallbackSeries);
         const fallbackSample = Math.round(this.getSampleIndexAtX(mouseX));
 
         const fallback: SnapCandidate = {
@@ -206,6 +234,7 @@ export class CrosshairOverlay {
             y: mouseY,
             sampleIndex: fallbackSample,
             value: fallbackValue,
+            color: null,
         };
 
         if (!this.snapEnabled || this.snapRadiusPx <= 0) {
@@ -213,36 +242,37 @@ export class CrosshairOverlay {
         }
 
         const width = this.canvas.width;
-        const visibleStart = Math.max(0, Math.floor(this.viewport.startIndex));
-        const visibleEnd = Math.min(this.buffer.data.length, Math.ceil(this.viewport.endIndex));
-        const visibleCount = visibleEnd - visibleStart;
+        const viewportSpan = Math.max(1, this.viewport.endIndex - this.viewport.startIndex);
+        const snapSeries = this.getSnapSeries();
 
-        if (width <= 0 || visibleCount <= 0) {
+        if (width <= 0 || snapSeries.length === 0) {
             return fallback;
         }
 
-        const samplesPerPixel = visibleCount / width;
+        const samplesPerPixel = viewportSpan / width;
         const radiusSamples = Math.max(1, Math.ceil(this.snapRadiusPx * samplesPerPixel));
 
         const centerIndex = Math.round(this.getSampleIndexAtX(mouseX));
-        const searchStart = this.clamp(centerIndex - radiusSamples, visibleStart, visibleEnd - 1);
-        const searchEnd = this.clamp(centerIndex + radiusSamples, visibleStart, visibleEnd - 1);
-
-        if (searchEnd < searchStart) {
-            return fallback;
-        }
 
         const maxCandidates = 4_000;
-        const totalCandidates = searchEnd - searchStart + 1;
-        const coarseStep = Math.max(1, Math.ceil(totalCandidates / maxCandidates));
 
         let bestIndex = -1;
         let bestX = mouseX;
         let bestY = mouseY;
+        let bestValue = fallbackValue;
+        let bestColor: string | null = null;
         let bestDistSq = Number.POSITIVE_INFINITY;
 
-        const evaluateIndex = (index: number): void => {
-            const value = this.buffer.data[index];
+        const evaluateIndex = (values: ArrayLike<number>, index: number, color?: string): number | null => {
+            if (index < 0 || index >= values.length) {
+                return null;
+            }
+
+            const value = values[index];
+            if (!Number.isFinite(value)) {
+                return null;
+            }
+
             const pointX = this.sampleIndexToCanvasX(index);
             const pointY = this.valueToCanvasY(value);
             const dx = pointX - mouseX;
@@ -254,19 +284,50 @@ export class CrosshairOverlay {
                 bestIndex = index;
                 bestX = pointX;
                 bestY = pointY;
+                bestValue = value;
+                bestColor = color ?? null;
             }
+            return distSq;
         };
 
-        for (let i = searchStart; i <= searchEnd; i += coarseStep) {
-            evaluateIndex(i);
-        }
+        for (const series of snapSeries) {
+            if (!series.visible || series.values.length <= 0) {
+                continue;
+            }
 
-        // Refine around the best coarse match with exact step=1 lookup
-        if (bestIndex >= 0 && coarseStep > 1) {
-            const refineStart = Math.max(searchStart, bestIndex - coarseStep);
-            const refineEnd = Math.min(searchEnd, bestIndex + coarseStep);
-            for (let i = refineStart; i <= refineEnd; i++) {
-                evaluateIndex(i);
+            const visibleStart = Math.max(0, Math.floor(this.viewport.startIndex));
+            const visibleEnd = Math.min(series.values.length, Math.ceil(this.viewport.endIndex));
+            if (visibleEnd <= visibleStart) {
+                continue;
+            }
+
+            const searchStart = this.clamp(centerIndex - radiusSamples, visibleStart, visibleEnd - 1);
+            const searchEnd = this.clamp(centerIndex + radiusSamples, visibleStart, visibleEnd - 1);
+            if (searchEnd < searchStart) {
+                continue;
+            }
+
+            const totalCandidates = searchEnd - searchStart + 1;
+            const coarseStep = Math.max(1, Math.ceil(totalCandidates / maxCandidates));
+
+            let seriesBestIndex = -1;
+            let seriesBestDistSq = Number.POSITIVE_INFINITY;
+
+            for (let i = searchStart; i <= searchEnd; i += coarseStep) {
+                const distSq = evaluateIndex(series.values, i, series.color);
+                if (distSq !== null && distSq < seriesBestDistSq) {
+                    seriesBestDistSq = distSq;
+                    seriesBestIndex = i;
+                }
+            }
+
+            // Refine around the best coarse match for this series with exact step=1 lookup
+            if (seriesBestIndex >= 0 && coarseStep > 1) {
+                const refineStart = Math.max(searchStart, seriesBestIndex - coarseStep);
+                const refineEnd = Math.min(searchEnd, seriesBestIndex + coarseStep);
+                for (let i = refineStart; i <= refineEnd; i++) {
+                    evaluateIndex(series.values, i, series.color);
+                }
             }
         }
 
@@ -284,7 +345,8 @@ export class CrosshairOverlay {
             x: bestX,
             y: bestY,
             sampleIndex: bestIndex,
-            value: this.buffer.data[bestIndex],
+            value: bestValue,
+            color: bestColor,
         };
     }
 
@@ -315,18 +377,45 @@ export class CrosshairOverlay {
         return this.viewport.startIndex + progress * (this.viewport.endIndex - this.viewport.startIndex);
     }
 
-    private getInterpolatedValueAtX(x: number): number {
+    private getInterpolatedValueAtX(x: number, values: ArrayLike<number> = this.buffer.data): number {
+        if (values.length <= 0) {
+            return 0;
+        }
+
         const sampleIndex = this.getSampleIndexAtX(x);
-        const maxIndex = this.buffer.data.length - 1;
+        const maxIndex = values.length - 1;
 
         const indexFloor = this.clamp(Math.floor(sampleIndex), 0, maxIndex);
         const indexCeil = this.clamp(Math.ceil(sampleIndex), 0, maxIndex);
 
-        const valueFloor = this.buffer.data[indexFloor];
-        const valueCeil = this.buffer.data[indexCeil];
+        const valueFloor = values[indexFloor];
+        const valueCeil = values[indexCeil];
 
         const fraction = sampleIndex - indexFloor;
         return valueFloor + (valueCeil - valueFloor) * fraction;
+    }
+
+    private getSnapSeries(): SnapSeries[] {
+        if (this.customSnapSeries && this.customSnapSeries.length > 0) {
+            return this.customSnapSeries;
+        }
+
+        return [{ values: this.buffer.data, visible: true }];
+    }
+
+    private getFallbackSeriesValues(): ArrayLike<number> {
+        const visibleSeries = this.getSnapSeries().find((series) => series.visible && series.values.length > 0);
+        return visibleSeries?.values ?? this.buffer.data;
+    }
+
+    private getVisibleSnapSeriesCount(): number {
+        let count = 0;
+        for (const series of this.getSnapSeries()) {
+            if (series.visible && series.values.length > 0) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private sampleIndexToCanvasX(index: number): number {
