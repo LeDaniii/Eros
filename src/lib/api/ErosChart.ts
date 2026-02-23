@@ -57,6 +57,15 @@ export interface ErosBinaryCurve {
     version: number;
 }
 
+export type ErosChartDisplayMode = 'analysis' | 'live-strip';
+
+export interface ErosChartViewportStrategyState {
+    displayMode: ErosChartDisplayMode;
+    followLatest: boolean;
+    liveWindowDurationSeconds: number;
+    isFrozen: boolean;
+}
+
 export class ErosChart {
     private static readonly BINARY_MAGIC = new Uint8Array([0x45, 0x52, 0x4f, 0x53]); // "EROS"
     private static readonly BINARY_VERSION = 1;
@@ -81,6 +90,14 @@ export class ErosChart {
     // === Viewport (Zoom/Pan) ===
     private viewportStart = 0;
     private viewportEnd = 0;
+
+    // === Display Mode / Viewport Strategy (P0 foundation; live-strip viewport math follows in a later slice) ===
+    private displayMode: ErosChartDisplayMode = 'analysis';
+    private viewportStrategy = {
+        followLatest: false,
+        liveWindowDurationSeconds: 10,
+        isFrozen: false,
+    };
 
     /**
      * Erstellt einen neuen ErosChart
@@ -277,6 +294,79 @@ export class ErosChart {
 
     public setViewportChangeListener(listener: ((startIndex: number, endIndex: number) => void) | null): void {
         this.viewportChangeListener = listener;
+    }
+
+    public setDisplayMode(mode: ErosChartDisplayMode): void {
+        if (this.displayMode === mode) {
+            return;
+        }
+
+        this.displayMode = mode;
+
+        if (mode === 'analysis') {
+            this.viewportStrategy.followLatest = false;
+            this.viewportStrategy.isFrozen = false;
+            return;
+        }
+
+        // Live-strip defaults to follow-latest unless explicitly frozen later.
+        if (!this.viewportStrategy.isFrozen) {
+            this.viewportStrategy.followLatest = true;
+        }
+    }
+
+    public getDisplayMode(): ErosChartDisplayMode {
+        return this.displayMode;
+    }
+
+    public setFollowLatest(enabled: boolean): void {
+        this.viewportStrategy.followLatest = enabled;
+        if (enabled) {
+            this.viewportStrategy.isFrozen = false;
+        }
+    }
+
+    public getFollowLatest(): boolean {
+        return this.viewportStrategy.followLatest;
+    }
+
+    public setLiveWindowDuration(seconds: number): void {
+        if (!Number.isFinite(seconds) || seconds <= 0) {
+            return;
+        }
+
+        this.viewportStrategy.liveWindowDurationSeconds = seconds;
+    }
+
+    public getLiveWindowDuration(): number {
+        return this.viewportStrategy.liveWindowDurationSeconds;
+    }
+
+    public freeze(): void {
+        if (this.displayMode !== 'live-strip') {
+            return;
+        }
+
+        this.viewportStrategy.isFrozen = true;
+        this.viewportStrategy.followLatest = false;
+    }
+
+    public resumeFollowLatest(): void {
+        if (this.displayMode !== 'live-strip') {
+            return;
+        }
+
+        this.viewportStrategy.isFrozen = false;
+        this.viewportStrategy.followLatest = true;
+    }
+
+    public getViewportStrategyState(): ErosChartViewportStrategyState {
+        return {
+            displayMode: this.displayMode,
+            followLatest: this.viewportStrategy.followLatest,
+            liveWindowDurationSeconds: this.viewportStrategy.liveWindowDurationSeconds,
+            isFrozen: this.viewportStrategy.isFrozen,
+        };
     }
 
     public setLineColor(lineColor: string): void {
@@ -587,6 +677,8 @@ export class ErosChart {
         let lastGridUpdate = 0;
 
         const frame = (now: number) => {
+            this.applyViewportStrategyFrame();
+
             // WebGPU Rendering (jeden Frame)
             this.renderer?.render();
 
@@ -635,6 +727,23 @@ export class ErosChart {
         };
 
         this.animationFrameId = requestAnimationFrame(frame);
+    }
+
+    /**
+     * Foundation hook for display-mode-dependent viewport policies.
+     * Live-strip fixed-window follow behavior is added in the next implementation slice.
+     */
+    private applyViewportStrategyFrame(): void {
+        if (this.displayMode !== 'live-strip') {
+            return;
+        }
+
+        if (this.viewportStrategy.isFrozen || !this.viewportStrategy.followLatest) {
+            return;
+        }
+
+        // Intentionally no-op for now:
+        // ticket 2 will compute and apply the fixed-duration follow-latest viewport here.
     }
 
     private static encodeBinary(values: Float32Array, sampleRate: number): ArrayBuffer {

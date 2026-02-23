@@ -68,6 +68,20 @@ Date: 2026-02-19
 - [ ] adaptive decimation.
 - [ ] Surface health/error state in both UI and API.
 
+### 5.1 Live Strip-Chart / Follow-Latest Mode (P0/P1)
+
+- [ ] `P0`: Add optional `Live Strip-Chart` display mode (fixed time window, newest samples on the right, data scrolls left).
+- [ ] `P0`: Add UI mode toggle (`Analysis` / `Live Strip`) without breaking current default behavior.
+- [ ] `P0`: Support configurable live window presets (e.g. `5s`, `10s`, `30s`) with a stable fixed-duration viewport.
+- [ ] `P0`: Implement `follow latest` viewport strategy (continuous auto-scroll while streaming).
+- [ ] `P0`: Keep manual zoom/pan analysis workflow separate from live follow mode (no mode confusion).
+- [ ] `P0`: Add `Freeze` action (pause viewport follow while data ingest continues or is buffered).
+- [ ] `P0`: Allow resume from `Freeze` back to `Follow Latest` in one action.
+- [ ] `P0`: Preserve signal visibility and Y-scaling behavior when switching between `Live Strip` and `Analysis`.
+- [ ] `P0`: Define Y-axis policy for live strip mode (`auto`, `fixed`, later `per-curve`).
+- [ ] `P1`: Add optional event markers / trigger markers for live testing workflows (e.g. probe/taster touch events).
+- [ ] `P1`: Add seamless handoff from frozen live view to investigation tools (crosshair/cursors on the same time window).
+
 ## 6. OSS API Design (P0)
 
 - [ ] Keep a stable public API (`ErosChart`) for both modes.
@@ -76,6 +90,11 @@ Date: 2026-02-19
 - [ ] `removeCurve(curveId)`.
 - [ ] `setCurveVisibility(curveId, visible)`.
 - [ ] `setCurveOffset(curveId, offsetMs)`.
+- [ ] Add live display mode API:
+- [ ] `setDisplayMode('analysis' | 'live-strip')`.
+- [ ] `setFollowLatest(enabled)`.
+- [ ] `setLiveWindowDuration(seconds)`.
+- [ ] `freeze()` / `resumeFollowLatest()`.
 - [ ] Add typed events (`onStats`, `onError`, `onViewportChange`, `onStreamState`).
 - [ ] Document SemVer policy.
 
@@ -122,6 +141,7 @@ Date: 2026-02-19
 - [ ] `P0`: Session state save/load (viewport, curve config, markers, alignment).
 - [ ] `P0`: Export selected time range to `CSV` and `PNG` snapshot.
 - [ ] `P0`: Stream controls (pause/resume/reconnect + buffer occupancy indicator).
+- [ ] `P0`: Live strip controls (follow latest, freeze, window presets).
 - [ ] `P1`: Keyboard-first workflow (shortcuts for cursors, zoom presets, curve toggles).
 - [ ] `P1`: Data quality overlays (gaps, clipping, dropouts, saturation).
 - [ ] `P1`: Lightweight performance HUD (`FPS`, frame time, memory).
