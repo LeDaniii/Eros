@@ -31,6 +31,15 @@ function clampNumber(value, minimumValue, maximumValue) {
     return Math.max(minimumValue, Math.min(maximumValue, value));
 }
 
+function randomRange(randomNumberFunction, minimumValue, maximumValue) {
+    return minimumValue + (maximumValue - minimumValue) * randomNumberFunction();
+}
+
+function createStreamSeed() {
+    // Generate a different 32-bit seed per stream while keeping the same signal model.
+    return ((Date.now() & 0xffffffff) ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
+}
+
 class CurveGenerator {
     constructor(durationSeconds, sampleRateHz = 10_000, seed = 123456789) {
         this.sampleRateHz = sampleRateHz;
@@ -40,16 +49,33 @@ class CurveGenerator {
 
         this.randomNumberFunction = createMulberry32Random(seed);
 
-        // Curve parameters (same as file generator)
-        this.lowFrequencyHertz = 3.0;
-        this.midFrequencyHertz = 120.0;
-        this.highFrequencyHertz = 900.0;
-        this.chirpStartHertz = 20.0;
-        this.chirpEndHertz = 2500.0;
-        this.driftAmplitude = 0.15;
-        this.noiseStandardDeviation = 0.03;
-        this.stepStartTimeSeconds = durationSeconds * 0.35;
-        this.stepSecondTimeSeconds = durationSeconds * 0.62;
+        // Per-stream randomized parameters so long-duration curves differ in macro shape too.
+        this.lowFrequencyHertz = randomRange(this.randomNumberFunction, 2.2, 4.8);
+        this.midFrequencyHertz = randomRange(this.randomNumberFunction, 80.0, 180.0);
+        this.highFrequencyHertz = randomRange(this.randomNumberFunction, 650.0, 1300.0);
+        this.lowFrequencyAmplitude = randomRange(this.randomNumberFunction, 0.7, 1.05);
+        this.midFrequencyAmplitude = randomRange(this.randomNumberFunction, 0.15, 0.32);
+        this.highFrequencyAmplitude = randomRange(this.randomNumberFunction, 0.04, 0.12);
+        this.lowFrequencyPhaseRadians = randomRange(this.randomNumberFunction, 0, 2 * Math.PI);
+        this.midFrequencyPhaseRadians = randomRange(this.randomNumberFunction, 0, 2 * Math.PI);
+        this.highFrequencyPhaseRadians = randomRange(this.randomNumberFunction, 0, 2 * Math.PI);
+
+        this.chirpStartHertz = randomRange(this.randomNumberFunction, 10.0, 50.0);
+        this.chirpEndHertz = randomRange(this.randomNumberFunction, 1800.0, 3200.0);
+        this.chirpAmplitude = randomRange(this.randomNumberFunction, 0.10, 0.24);
+        this.chirpPhaseRadians = randomRange(this.randomNumberFunction, 0, 2 * Math.PI);
+
+        const driftSign = this.randomNumberFunction() < 0.5 ? -1 : 1;
+        this.driftAmplitude = randomRange(this.randomNumberFunction, 0.08, 0.22) * driftSign;
+        this.noiseStandardDeviation = randomRange(this.randomNumberFunction, 0.02, 0.05);
+
+        this.stepStartTimeSeconds = durationSeconds * randomRange(this.randomNumberFunction, 0.24, 0.42);
+        this.stepSecondTimeSeconds = durationSeconds * randomRange(this.randomNumberFunction, 0.54, 0.80);
+        if (this.stepSecondTimeSeconds <= this.stepStartTimeSeconds + 0.05) {
+            this.stepSecondTimeSeconds = Math.min(durationSeconds * 0.95, this.stepStartTimeSeconds + 0.05);
+        }
+        this.stepFirstAmplitude = randomRange(this.randomNumberFunction, 0.22, 0.45);
+        this.stepSecondAmplitude = -randomRange(this.randomNumberFunction, 0.35, 0.70);
 
         // Pre-generate spike times
         const spikeCount = Math.max(5, Math.floor(durationSeconds * 2));
@@ -82,23 +108,27 @@ class CurveGenerator {
 
         // Baseline (multi-frequency sine)
         const baseline =
-            0.9 * Math.sin(2 * Math.PI * this.lowFrequencyHertz * timeSeconds) +
-            0.25 * Math.sin(2 * Math.PI * this.midFrequencyHertz * timeSeconds) +
-            0.08 * Math.sin(2 * Math.PI * this.highFrequencyHertz * timeSeconds);
+            this.lowFrequencyAmplitude *
+            Math.sin(2 * Math.PI * this.lowFrequencyHertz * timeSeconds + this.lowFrequencyPhaseRadians) +
+            this.midFrequencyAmplitude *
+            Math.sin(2 * Math.PI * this.midFrequencyHertz * timeSeconds + this.midFrequencyPhaseRadians) +
+            this.highFrequencyAmplitude *
+            Math.sin(2 * Math.PI * this.highFrequencyHertz * timeSeconds + this.highFrequencyPhaseRadians);
 
         // Chirp
         const chirpProgress = timeSeconds / this.durationSeconds;
         const chirpFrequencyHertz = this.chirpStartHertz +
             (this.chirpEndHertz - this.chirpStartHertz) * chirpProgress;
-        const chirpSignal = 0.18 * Math.sin(2 * Math.PI * chirpFrequencyHertz * timeSeconds);
+        const chirpSignal = this.chirpAmplitude *
+            Math.sin(2 * Math.PI * chirpFrequencyHertz * timeSeconds + this.chirpPhaseRadians);
 
         // Drift
         const driftSignal = this.driftAmplitude * (chirpProgress - 0.5);
 
         // Steps
         let stepSignal = 0;
-        if (timeSeconds >= this.stepStartTimeSeconds) stepSignal += 0.35;
-        if (timeSeconds >= this.stepSecondTimeSeconds) stepSignal -= 0.55;
+        if (timeSeconds >= this.stepStartTimeSeconds) stepSignal += this.stepFirstAmplitude;
+        if (timeSeconds >= this.stepSecondTimeSeconds) stepSignal += this.stepSecondAmplitude;
 
         // Bursts
         let burstSignal = 0;
@@ -161,11 +191,14 @@ const routes = (router) => {
     router.service(MeasurementService, {
         streamMeasurements: async function* streamMeasurements(request) {
             if (!currentGenerator) {
+                const streamSeed = createStreamSeed();
                 console.log("Creating new curve generator...");
                 currentGenerator = new CurveGenerator(
                     streamConfig.durationSeconds,
-                    streamConfig.sampleRateHz
+                    streamConfig.sampleRateHz,
+                    streamSeed
                 );
+                console.log(`Using stream seed: ${streamSeed}`);
             }
 
             streamConfig.isStreaming = true;
