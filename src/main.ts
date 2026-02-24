@@ -2,8 +2,11 @@
  * Demo app for Eros Charts
  */
 
+import { createClient } from '@connectrpc/connect';
+import { createConnectTransport } from '@connectrpc/connect-web';
 import { ErosChart, type ErosBinaryCurve } from './lib/charts/ErosChart';
 import { ErosStripChart } from './lib/charts/ErosStripChart';
+import { MeasurementService } from './gen/measurements_pb';
 
 // ==========================================
 // GLOBAL STATE
@@ -24,6 +27,7 @@ let currentViewMode: 'idle' | 'live' | 'binary' = 'idle';
 let binaryOverlayCharts: ErosChart[] = [];
 let binaryOverlayCanvases: HTMLCanvasElement[] = [];
 let binaryCompareSyncFrameId: number | null = null;
+const booleanStripSamples: number[] = [];
 
 interface ImportedBinaryEntry {
     fileName: string;
@@ -45,6 +49,10 @@ const displayModePreferences: {
 
 const DEFAULT_GRPC_URL = 'http://localhost:50051';
 const EROS_BINARY_EXTENSION = '.erosb';
+const BOOLEAN_STRIP_SAMPLE_RATE = 60; // lokale Hold-Abtastung für flüssige Bewegung
+const BOOLEAN_STRIP_BUFFER_SECONDS = 600; // 10 Minuten Historie
+const BOOLEAN_STRIP_BUFFER_SIZE = BOOLEAN_STRIP_SAMPLE_RATE * BOOLEAN_STRIP_BUFFER_SECONDS;
+const BOOLEAN_STRIP_LINE_COLOR = '#ffd166';
 const BINARY_COMPARE_COLORS = [
     '#00d1ff',
     '#ff6b6b',
@@ -55,6 +63,130 @@ const BINARY_COMPARE_COLORS = [
     '#8ecae6',
     '#ff99c8',
 ];
+
+let booleanStripRpcStreamStarted = false;
+let booleanStripHoldSamplerStarted = false;
+let booleanStripCurrentValue = false;
+let booleanStripHoldLastTickMs: number | null = null;
+let booleanStripHoldAccumulatorMs = 0;
+
+function ensureBooleanStripBufferInitialized(): void {
+    if (booleanStripSamples.length > 0) {
+        return;
+    }
+
+    for (let i = 0; i < BOOLEAN_STRIP_BUFFER_SIZE; i++) {
+        booleanStripSamples.push(0);
+    }
+}
+
+function startBooleanStripHoldSampler(): void {
+    if (booleanStripHoldSamplerStarted) {
+        return;
+    }
+
+    booleanStripHoldSamplerStarted = true;
+    const samplePeriodMs = 1000 / BOOLEAN_STRIP_SAMPLE_RATE;
+
+    // Zeitbasierter Zero-Order-Hold: verhindert Drift zwischen Datenbewegung und Wall-Clock-Achse.
+    const tick = (): void => {
+        const nowMs = Date.now();
+        if (booleanStripHoldLastTickMs === null) {
+            booleanStripHoldLastTickMs = nowMs;
+        }
+
+        let deltaMs = nowMs - booleanStripHoldLastTickMs;
+        booleanStripHoldLastTickMs = nowMs;
+
+        // Nach Tab-Pausen kein großes Catch-up rendern.
+        if (deltaMs > 250) {
+            deltaMs = samplePeriodMs;
+            booleanStripHoldAccumulatorMs = 0;
+        }
+
+        booleanStripHoldAccumulatorMs += Math.max(0, deltaMs);
+        let samplesToEmit = Math.floor(booleanStripHoldAccumulatorMs / samplePeriodMs);
+
+        if (samplesToEmit > 0) {
+            booleanStripHoldAccumulatorMs -= samplesToEmit * samplePeriodMs;
+            appendBooleanStripSamples(booleanStripCurrentValue, samplesToEmit);
+        }
+
+        window.requestAnimationFrame(tick);
+    };
+
+    window.requestAnimationFrame(tick);
+}
+
+function renderBooleanSamplesOnStripChart(targetChart: ErosStripChart): void {
+    ensureBooleanStripBufferInitialized();
+
+    targetChart.loadData(Float32Array.from(booleanStripSamples));
+    targetChart.setYRangeOverride(-0.2, 1.2);
+}
+
+function appendBooleanStripSamples(value: boolean, sampleCount: number): void {
+    if (sampleCount <= 0) {
+        return;
+    }
+
+    ensureBooleanStripBufferInitialized();
+
+    const normalizedValue = value ? 1 : 0;
+
+    if (sampleCount >= BOOLEAN_STRIP_BUFFER_SIZE) {
+        booleanStripSamples.length = 0;
+        for (let i = 0; i < BOOLEAN_STRIP_BUFFER_SIZE; i++) {
+            booleanStripSamples.push(normalizedValue);
+        }
+    } else {
+        const overflowCount = Math.max(0, booleanStripSamples.length + sampleCount - BOOLEAN_STRIP_BUFFER_SIZE);
+        if (overflowCount > 0) {
+            booleanStripSamples.splice(0, overflowCount);
+        }
+
+        for (let i = 0; i < sampleCount; i++) {
+            booleanStripSamples.push(normalizedValue);
+        }
+    }
+
+    if (currentViewMode !== 'binary' && isStripChartInstance(chart)) {
+        renderBooleanSamplesOnStripChart(chart);
+    }
+}
+
+function startBooleanStripRpcStream(): void {
+    startBooleanStripHoldSampler();
+
+    if (booleanStripRpcStreamStarted) return;
+    booleanStripRpcStreamStarted = true;
+
+    const transport = createConnectTransport({
+        baseUrl: DEFAULT_GRPC_URL,
+        useBinaryFormat: true,
+    });
+    const client = createClient(MeasurementService, transport);
+
+    void (async () => {
+        try {
+            console.log('[Frontend RPC] Starte Boolean-Status-Stream für StripChart...');
+
+            const response = client.streamBooleanStatus({});
+            for await (const tick of response) {
+                const numericValue = tick.value ? 1 : 0;
+                const timestampMs = Number(tick.timestamp);
+                const isoTimestamp = new Date(timestampMs).toISOString();
+                booleanStripCurrentValue = tick.value;
+                console.log(`[Frontend RPC] Boolean-Status: ${numericValue} (${tick.value}) @ ${isoTimestamp}`);
+            }
+
+            console.warn('[Frontend RPC] Boolean-Status-Stream beendet.');
+        } catch (error) {
+            console.error('[Frontend RPC] Boolean-Status-Stream Fehler:', error);
+            booleanStripRpcStreamStarted = false;
+        }
+    })();
+}
 
 // ==========================================
 // UI CONTROL PANEL
@@ -300,7 +432,7 @@ async function createOrReplaceAnalysisChart(sampleRate: number, bufferSize: numb
     return nextChart;
 }
 
-async function createOrReplaceStripChart(sampleRate: number, bufferSize: number): Promise<ErosStripChart> {
+async function createOrReplaceStripChart(_sampleRate: number, _bufferSize: number): Promise<ErosStripChart> {
     destroyBinaryOverlayCharts();
 
     const baseCanvas = document.getElementById('plotCanvas');
@@ -315,14 +447,17 @@ async function createOrReplaceStripChart(sampleRate: number, bufferSize: number)
 
     const nextChart = new ErosStripChart('#plotCanvas', {
         grpcUrl: DEFAULT_GRPC_URL,
-        bufferSize,
-        sampleRate,
-        lineColor: '#0080ff',
+        bufferSize: BOOLEAN_STRIP_BUFFER_SIZE,
+        sampleRate: BOOLEAN_STRIP_SAMPLE_RATE,
+        lineColor: BOOLEAN_STRIP_LINE_COLOR,
         liveWindowDurationSeconds: displayModePreferences.liveWindowSeconds,
+        enableWorker: false,
     });
 
     await nextChart.initialize();
     applyDisplayModePreferencesToChart(nextChart);
+    nextChart.setYRangeOverride(-0.2, 1.2);
+    renderBooleanSamplesOnStripChart(nextChart);
     chart = nextChart;
     refreshDisplayModeControls();
     return nextChart;
@@ -743,8 +878,12 @@ function setupButtonHandlers(): void {
 
                 updateStatus('Creating live strip chart...');
                 await createOrReplaceStripChart(sampleRate, bufferSize);
+                startBooleanStripRpcStream();
                 setViewMode('live');
-                updateStatus(`Live strip ready (${displayModePreferences.liveWindowSeconds}s window) | Click START STREAM`);
+                if (isStripChartInstance(chart)) {
+                    renderBooleanSamplesOnStripChart(chart);
+                }
+                updateStatus(`Live strip zeigt Boolean-RPC (${displayModePreferences.liveWindowSeconds}s window)`);
             } catch (error: unknown) {
                 const message = error instanceof Error ? error.message : String(error);
                 updateStatus(`Live strip init failed: ${message}`);
@@ -754,9 +893,11 @@ function setupButtonHandlers(): void {
         }
 
         if (isStripChartInstance(chart)) {
+            startBooleanStripRpcStream();
+            renderBooleanSamplesOnStripChart(chart);
             chart.setLiveWindowDuration(displayModePreferences.liveWindowSeconds);
             chart.resumeFollowLatest();
-            updateStatus(`Display mode: live strip (${displayModePreferences.liveWindowSeconds}s window)`);
+            updateStatus(`Display mode: live strip (Boolean-RPC, ${displayModePreferences.liveWindowSeconds}s window)`);
         }
         refreshDisplayModeControls();
     });
@@ -804,6 +945,16 @@ function setupButtonHandlers(): void {
         const sampleRate = parseInt(sampleRateInput.value, 10);
 
         try {
+            if (displayModePreferences.mode === 'live-strip') {
+                updateStatus('Opening strip chart (Boolean-RPC)...');
+                const activeChart = await createOrReplaceStripChart(sampleRate, Math.ceil(duration * sampleRate * 1.1));
+                startBooleanStripRpcStream();
+                renderBooleanSamplesOnStripChart(activeChart);
+                setViewMode('live');
+                updateStatus('Strip chart zeigt Boolean-RPC automatisch (kein START nötig).');
+                return;
+            }
+
             updateStatus('Creating new chart...');
 
             const bufferSize = Math.ceil(duration * sampleRate * 1.1);

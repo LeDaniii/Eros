@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file measurements.proto.
  */
 export const file_measurements: GenFile = /*@__PURE__*/
-  fileDesc("ChJtZWFzdXJlbWVudHMucHJvdG8SB21ldHJpY3MiOwoQTWVhc3VyZW1lbnRCYXRjaBIOCgZ2YWx1ZXMYASADKAISFwoPdGltZXN0YW1wX3N0YXJ0GAIgASgDIgcKBUVtcHR5MlcKEk1lYXN1cmVtZW50U2VydmljZRJBChJTdHJlYW1NZWFzdXJlbWVudHMSDi5tZXRyaWNzLkVtcHR5GhkubWV0cmljcy5NZWFzdXJlbWVudEJhdGNoMAFiBnByb3RvMw");
+  fileDesc("ChJtZWFzdXJlbWVudHMucHJvdG8SB21ldHJpY3MiOwoQTWVhc3VyZW1lbnRCYXRjaBIOCgZ2YWx1ZXMYASADKAISFwoPdGltZXN0YW1wX3N0YXJ0GAIgASgDIjUKEUJvb2xlYW5TdGF0dXNUaWNrEg0KBXZhbHVlGAEgASgIEhEKCXRpbWVzdGFtcBgCIAEoAyIHCgVFbXB0eTKcAQoSTWVhc3VyZW1lbnRTZXJ2aWNlEkEKElN0cmVhbU1lYXN1cmVtZW50cxIOLm1ldHJpY3MuRW1wdHkaGS5tZXRyaWNzLk1lYXN1cmVtZW50QmF0Y2gwARJDChNTdHJlYW1Cb29sZWFuU3RhdHVzEg4ubWV0cmljcy5FbXB0eRoaLm1ldHJpY3MuQm9vbGVhblN0YXR1c1RpY2swAWIGcHJvdG8z");
 
 /**
  * Ein Paket mit mehreren Messpunkten, um den Overhead pro Call zu senken
@@ -41,6 +41,34 @@ export const MeasurementBatchSchema: GenMessage<MeasurementBatch> = /*@__PURE__*
   messageDesc(file_measurements, 0);
 
 /**
+ * Bool-Status-Tick (true/false), 1x pro Sekunde
+ *
+ * @generated from message metrics.BooleanStatusTick
+ */
+export type BooleanStatusTick = Message<"metrics.BooleanStatusTick"> & {
+  /**
+   * true/false (entspricht 1/0)
+   *
+   * @generated from field: bool value = 1;
+   */
+  value: boolean;
+
+  /**
+   * Unix-Zeit in Millisekunden
+   *
+   * @generated from field: int64 timestamp = 2;
+   */
+  timestamp: bigint;
+};
+
+/**
+ * Describes the message metrics.BooleanStatusTick.
+ * Use `create(BooleanStatusTickSchema)` to create a new message.
+ */
+export const BooleanStatusTickSchema: GenMessage<BooleanStatusTick> = /*@__PURE__*/
+  messageDesc(file_measurements, 1);
+
+/**
  * @generated from message metrics.Empty
  */
 export type Empty = Message<"metrics.Empty"> & {
@@ -51,7 +79,7 @@ export type Empty = Message<"metrics.Empty"> & {
  * Use `create(EmptySchema)` to create a new message.
  */
 export const EmptySchema: GenMessage<Empty> = /*@__PURE__*/
-  messageDesc(file_measurements, 1);
+  messageDesc(file_measurements, 2);
 
 /**
  * @generated from service metrics.MeasurementService
@@ -66,6 +94,16 @@ export const MeasurementService: GenService<{
     methodKind: "server_streaming";
     input: typeof EmptySchema;
     output: typeof MeasurementBatchSchema;
+  },
+  /**
+   * Ein zweiter Stream mit boolschem Status (1x pro Sekunde)
+   *
+   * @generated from rpc metrics.MeasurementService.StreamBooleanStatus
+   */
+  streamBooleanStatus: {
+    methodKind: "server_streaming";
+    input: typeof EmptySchema;
+    output: typeof BooleanStatusTickSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_measurements, 0);

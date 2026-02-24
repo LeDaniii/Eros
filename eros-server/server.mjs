@@ -1,7 +1,11 @@
 import * as http from "node:http";
 import { connectNodeAdapter } from "@connectrpc/connect-node";
 import { create } from "@bufbuild/protobuf";
-import { MeasurementService, MeasurementBatchSchema } from "./gen/measurements_pb.js";
+import {
+    MeasurementService,
+    MeasurementBatchSchema,
+    BooleanStatusTickSchema,
+} from "./gen/measurements_pb.js";
 
 // ========================
 // Kurven-Generator (aus dem File-Script kopiert)
@@ -183,6 +187,64 @@ let streamConfig = {
     isStreaming: false,
 };
 
+let booleanStatusStream = {
+    currentValue: false,
+    timestamp: BigInt(Date.now()),
+    sequence: 0,
+    listeners: new Set(),
+    intervalHandle: null,
+};
+
+function publishBooleanStatusTick(nextValue) {
+    booleanStatusStream.currentValue = nextValue;
+    booleanStatusStream.timestamp = BigInt(Date.now());
+    booleanStatusStream.sequence += 1;
+
+    for (const listener of booleanStatusStream.listeners) {
+        listener();
+    }
+}
+
+function waitForNextBooleanStatusTick(lastSequence, abortSignal) {
+    if (booleanStatusStream.sequence > lastSequence) {
+        return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+        const onTick = () => {
+            cleanup();
+            resolve();
+        };
+
+        const onAbort = () => {
+            cleanup();
+            resolve();
+        };
+
+        const cleanup = () => {
+            booleanStatusStream.listeners.delete(onTick);
+            abortSignal?.removeEventListener?.("abort", onAbort);
+        };
+
+        booleanStatusStream.listeners.add(onTick);
+        abortSignal?.addEventListener?.("abort", onAbort, { once: true });
+    });
+}
+
+function startBooleanStatusTicker() {
+    if (booleanStatusStream.intervalHandle) return;
+
+    const emitTick = () => {
+        const nextValue = Math.random() >= 0.5;
+        publishBooleanStatusTick(nextValue);
+        console.log(`[Bool-Stream] Tick: ${nextValue ? 1 : 0}`);
+    };
+
+    emitTick();
+    booleanStatusStream.intervalHandle = setInterval(emitTick, 1000);
+    console.log("Bool-Status-Ticker gestartet (1x pro Sekunde).");
+}
+
 // ========================
 // gRPC Routes
 // ========================
@@ -229,6 +291,32 @@ const routes = (router) => {
             streamConfig.isStreaming = false;
             currentGenerator = null;
         },
+        streamBooleanStatus: async function* streamBooleanStatus(_request, context) {
+            console.log("Boolean status stream client connected.");
+            let lastSequence = 0;
+
+            try {
+                while (!context?.signal?.aborted) {
+                    await waitForNextBooleanStatusTick(lastSequence, context?.signal);
+
+                    if (context?.signal?.aborted) {
+                        break;
+                    }
+
+                    if (booleanStatusStream.sequence <= lastSequence) {
+                        continue;
+                    }
+
+                    lastSequence = booleanStatusStream.sequence;
+                    yield create(BooleanStatusTickSchema, {
+                        value: booleanStatusStream.currentValue,
+                        timestamp: booleanStatusStream.timestamp,
+                    });
+                }
+            } finally {
+                console.log("Boolean status stream client disconnected.");
+            }
+        },
     });
 };
 
@@ -245,6 +333,8 @@ const allowedOrigins = [
 
 const allowedHeaders =
     "Content-Type, Connect-Protocol-Version, Connect-Timeout-Ms, Grpc-Timeout, Authorization";
+
+startBooleanStatusTicker();
 
 http.createServer((request, response) => {
     const origin = request.headers.origin || "";
@@ -304,6 +394,11 @@ http.createServer((request, response) => {
         response.end(JSON.stringify({
             isStreaming: streamConfig.isStreaming,
             config: streamConfig,
+            booleanStatus: {
+                running: Boolean(booleanStatusStream.intervalHandle),
+                currentValue: booleanStatusStream.currentValue,
+                sequence: booleanStatusStream.sequence,
+            },
         }));
         return;
     }
@@ -313,4 +408,5 @@ http.createServer((request, response) => {
 }).listen(50051, () => {
     console.log("Server läuft auf http://localhost:50051");
     console.log("REST API: POST /api/configure, GET /api/status");
+    console.log("RPC: StreamMeasurements, StreamBooleanStatus");
 });

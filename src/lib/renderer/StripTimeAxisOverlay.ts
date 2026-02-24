@@ -19,6 +19,9 @@ export interface StripTimeAxisDrawParams {
 export class StripTimeAxisOverlay {
     private readonly overlayCanvas: HTMLCanvasElement;
     private readonly ctx: CanvasRenderingContext2D;
+    private devicePixelRatio = 1;
+    private cssWidth = 1;
+    private cssHeight = 1;
     private readonly secondFormatter = new Intl.DateTimeFormat(undefined, {
         hour: '2-digit',
         minute: '2-digit',
@@ -35,8 +38,6 @@ export class StripTimeAxisOverlay {
 
     constructor(mainCanvas: HTMLCanvasElement) {
         this.overlayCanvas = document.createElement('canvas');
-        this.overlayCanvas.width = mainCanvas.width;
-        this.overlayCanvas.height = mainCanvas.height;
 
         this.overlayCanvas.style.position = 'absolute';
         this.overlayCanvas.style.top = '0';
@@ -51,10 +52,16 @@ export class StripTimeAxisOverlay {
             throw new Error('Canvas2D context is not available');
         }
         this.ctx = ctx;
+
+        this.resize(
+            mainCanvas.clientWidth || mainCanvas.width,
+            mainCanvas.clientHeight || mainCanvas.height
+        );
     }
 
     draw(params: StripTimeAxisDrawParams): void {
-        const { width, height } = this.overlayCanvas;
+        const width = this.cssWidth;
+        const height = this.cssHeight;
         this.ctx.clearRect(0, 0, width, height);
 
         if (width <= 0 || height <= 0) {
@@ -74,8 +81,21 @@ export class StripTimeAxisOverlay {
     }
 
     resize(width: number, height: number): void {
-        this.overlayCanvas.width = width;
-        this.overlayCanvas.height = height;
+        const safeWidth = Math.max(1, Math.round(width));
+        const safeHeight = Math.max(1, Math.round(height));
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+
+        this.devicePixelRatio = dpr;
+        this.cssWidth = safeWidth;
+        this.cssHeight = safeHeight;
+
+        this.overlayCanvas.style.width = `${safeWidth}px`;
+        this.overlayCanvas.style.height = `${safeHeight}px`;
+        this.overlayCanvas.width = Math.max(1, Math.round(safeWidth * dpr));
+        this.overlayCanvas.height = Math.max(1, Math.round(safeHeight * dpr));
+
+        // Draw in CSS pixel coordinates while keeping a high-resolution backing store.
+        this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
 
     destroy(): void {
@@ -84,20 +104,21 @@ export class StripTimeAxisOverlay {
 
     private drawAxisBand(plot: PlotRect): void {
         const bandTop = Math.max(0, plot.bottom + 1);
-        const bandHeight = Math.max(0, this.overlayCanvas.height - bandTop);
+        const bandHeight = Math.max(0, this.cssHeight - bandTop);
         if (bandHeight <= 0) {
             return;
         }
 
         // Cover the generic X-axis labels/title rendered by GridOverlay.
         this.ctx.fillStyle = 'rgba(0, 0, 0, 0.88)';
-        this.ctx.fillRect(0, bandTop, this.overlayCanvas.width, bandHeight);
+        this.ctx.fillRect(0, bandTop, this.cssWidth, bandHeight);
 
         this.ctx.strokeStyle = 'rgba(110, 110, 110, 0.45)';
-        this.ctx.lineWidth = 1;
+        this.ctx.lineWidth = this.getCrispLineWidth();
         this.ctx.beginPath();
-        this.ctx.moveTo(plot.left, plot.bottom + 0.5);
-        this.ctx.lineTo(plot.right, plot.bottom + 0.5);
+        const alignedY = this.alignStrokeCoordinate(plot.bottom);
+        this.ctx.moveTo(plot.left, alignedY);
+        this.ctx.lineTo(plot.right, alignedY);
         this.ctx.stroke();
     }
 
@@ -113,7 +134,7 @@ export class StripTimeAxisOverlay {
         this.ctx.textBaseline = 'top';
         this.ctx.fillStyle = '#d0d0d0';
         this.ctx.strokeStyle = 'rgba(130, 170, 255, 0.30)';
-        this.ctx.lineWidth = 1;
+        this.ctx.lineWidth = this.getCrispLineWidth();
 
         let tickCount = 0;
         for (let t = firstTickMs; t <= viewportEndMs + epsilon && tickCount < maxTicks; t += tickStepMs) {
@@ -123,33 +144,35 @@ export class StripTimeAxisOverlay {
             }
 
             const x = plot.left + progress * plot.width;
+            const alignedX = this.alignStrokeCoordinate(x);
 
             // Strip-specific wall-clock grid line across the plot area.
             this.ctx.beginPath();
-            this.ctx.moveTo(x + 0.5, plot.top);
-            this.ctx.lineTo(x + 0.5, plot.bottom);
+            this.ctx.moveTo(alignedX, plot.top);
+            this.ctx.lineTo(alignedX, plot.bottom);
             this.ctx.stroke();
 
             // Short tick mark in the axis band.
             this.ctx.beginPath();
-            this.ctx.moveTo(x + 0.5, plot.bottom + 1);
-            this.ctx.lineTo(x + 0.5, Math.min(this.overlayCanvas.height - 2, plot.bottom + 7));
+            this.ctx.moveTo(alignedX, plot.bottom + 1);
+            this.ctx.lineTo(alignedX, Math.min(this.cssHeight - 2, plot.bottom + 7));
             this.ctx.stroke();
 
-            this.ctx.fillText(this.formatTime(t, tickStepMs), x, plot.bottom + 8);
+            this.ctx.fillText(this.formatTime(t, tickStepMs), Math.round(x), plot.bottom + 8);
             tickCount++;
         }
 
         // Right-edge marker for visual "now/frozen edge" reference.
         this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+        const rightEdgeX = this.alignStrokeCoordinate(plot.right);
         this.ctx.beginPath();
-        this.ctx.moveTo(plot.right + 0.5, plot.top);
-        this.ctx.lineTo(plot.right + 0.5, this.overlayCanvas.height);
+        this.ctx.moveTo(rightEdgeX, plot.top);
+        this.ctx.lineTo(rightEdgeX, this.cssHeight);
         this.ctx.stroke();
     }
 
     private drawStatus(plot: PlotRect, params: StripTimeAxisDrawParams, viewportDurationMs: number): void {
-        const bandTextY = Math.min(this.overlayCanvas.height - 14, plot.bottom + 8);
+        const bandTextY = Math.min(this.cssHeight - 14, plot.bottom + 8);
         const status = params.isFrozen ? 'FROZEN' : (params.followLatest ? 'LIVE' : 'MANUAL');
         const windowSeconds = viewportDurationMs / 1000;
 
@@ -174,5 +197,14 @@ export class StripTimeAxisOverlay {
             return this.millisecondFormatter.format(date);
         }
         return this.secondFormatter.format(date);
+    }
+
+    private getCrispLineWidth(): number {
+        return 1 / this.devicePixelRatio;
+    }
+
+    private alignStrokeCoordinate(value: number): number {
+        const dpr = this.devicePixelRatio;
+        return (Math.round(value * dpr) + 0.5) / dpr;
     }
 }

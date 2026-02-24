@@ -8,9 +8,17 @@ message MeasurementBatch {
   int64 timestamp_start = 2; // Zeitstempel des ersten Punktes
 }
 
+// Bool-Status-Tick (true/false), 1x pro Sekunde
+message BooleanStatusTick {
+  bool value = 1;      // true/false (entspricht 1/0)
+  int64 timestamp = 2; // Unix-Zeit in Millisekunden
+}
+
 service MeasurementService {
   // Ein Server-Side Stream: Der Server pusht Daten, sobald sie vom Sensor kommen
   rpc StreamMeasurements (Empty) returns (stream MeasurementBatch);
+  // Ein zweiter Stream mit boolschem Status (1x pro Sekunde)
+  rpc StreamBooleanStatus (Empty) returns (stream BooleanStatusTick);
 }
 
 message Empty {}

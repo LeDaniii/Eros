@@ -23,6 +23,14 @@ import { MeasurementService } from "../../gen/measurements_pb";
 // Globale Variablen (Worker-Scope, nicht window!)
 let sharedBuffer: Float32Array;   // Die Messdaten (shared memory)
 let headPointer: Int32Array;       // Der Ring-Buffer Index (shared memory)
+function createMeasurementClient() {
+    const transport = createConnectTransport({
+        baseUrl: "http://localhost:50051",
+        useBinaryFormat: true,  // Protocol Buffers (schneller als JSON!)
+    });
+
+    return createClient(MeasurementService, transport);
+}
 
 /**
  * Message Handler - empfängt Nachrichten vom Main Thread
@@ -74,14 +82,8 @@ self.onmessage = async (e) => {
  * - Modulo Operator (%): 100000 % 100000 = 0 (zurück zum Start)
  */
 async function startStreaming() {
-    // gRPC Transport Setup (Connect-RPC verwendet HTTP/2)
-    const transport = createConnectTransport({
-        baseUrl: "http://localhost:50051",
-        useBinaryFormat: true,  // Protocol Buffers (schneller als JSON!)
-    });
-
     // Client erstellen (type-safe dank Protobuf!)
-    const client = createClient(MeasurementService, transport);
+    const client = createMeasurementClient();
 
     try {
         console.log("Worker: Verbinde mit gRPC Server...");

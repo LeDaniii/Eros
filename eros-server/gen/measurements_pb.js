@@ -8,7 +8,7 @@ import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2
  * Describes the file measurements.proto.
  */
 export const file_measurements = /*@__PURE__*/
-  fileDesc("ChJtZWFzdXJlbWVudHMucHJvdG8SB21ldHJpY3MiOwoQTWVhc3VyZW1lbnRCYXRjaBIOCgZ2YWx1ZXMYASADKAISFwoPdGltZXN0YW1wX3N0YXJ0GAIgASgDIgcKBUVtcHR5MlcKEk1lYXN1cmVtZW50U2VydmljZRJBChJTdHJlYW1NZWFzdXJlbWVudHMSDi5tZXRyaWNzLkVtcHR5GhkubWV0cmljcy5NZWFzdXJlbWVudEJhdGNoMAFiBnByb3RvMw");
+  fileDesc("ChJtZWFzdXJlbWVudHMucHJvdG8SB21ldHJpY3MiOwoQTWVhc3VyZW1lbnRCYXRjaBIOCgZ2YWx1ZXMYASADKAISFwoPdGltZXN0YW1wX3N0YXJ0GAIgASgDIjUKEUJvb2xlYW5TdGF0dXNUaWNrEg0KBXZhbHVlGAEgASgIEhEKCXRpbWVzdGFtcBgCIAEoAyIHCgVFbXB0eTKcAQoSTWVhc3VyZW1lbnRTZXJ2aWNlEkEKElN0cmVhbU1lYXN1cmVtZW50cxIOLm1ldHJpY3MuRW1wdHkaGS5tZXRyaWNzLk1lYXN1cmVtZW50QmF0Y2gwARJDChNTdHJlYW1Cb29sZWFuU3RhdHVzEg4ubWV0cmljcy5FbXB0eRoaLm1ldHJpY3MuQm9vbGVhblN0YXR1c1RpY2swAWIGcHJvdG8z");
 
 /**
  * Describes the message metrics.MeasurementBatch.
@@ -18,11 +18,18 @@ export const MeasurementBatchSchema = /*@__PURE__*/
   messageDesc(file_measurements, 0);
 
 /**
+ * Describes the message metrics.BooleanStatusTick.
+ * Use `create(BooleanStatusTickSchema)` to create a new message.
+ */
+export const BooleanStatusTickSchema = /*@__PURE__*/
+  messageDesc(file_measurements, 1);
+
+/**
  * Describes the message metrics.Empty.
  * Use `create(EmptySchema)` to create a new message.
  */
 export const EmptySchema = /*@__PURE__*/
-  messageDesc(file_measurements, 1);
+  messageDesc(file_measurements, 2);
 
 /**
  * @generated from service metrics.MeasurementService
