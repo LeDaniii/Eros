@@ -14,7 +14,6 @@ WebGPU-basierte Chart-Library für Echtzeit-Datenvisualisierung über gRPC Strea
 ## 🎯 Use Cases
 
 - Embedded/IoT Dashboards (z.B. Prüfstände)
-- Fintech Trading Charts
 - Scientific Data Visualization
 - Monitoring Tools
 
