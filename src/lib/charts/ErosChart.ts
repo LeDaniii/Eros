@@ -38,6 +38,8 @@ export interface ErosChartOptions {
     snapRadiusPx?: number;  // Snap radius in pixels (default: 14)
     snapIndicatorRadiusPx?: number; // Visual radius of snapped point circle (default: 5)
     showGrid?: boolean;     // Show grid overlay (default: true)
+    showXAxisGrid?: boolean; // Show X-axis grid/ticks on shared GridOverlay (default: true)
+    showXAxisTitle?: boolean; // Show X-axis title on shared GridOverlay (default: true)
     showCrosshair?: boolean; // Show crosshair overlay (default: true)
     enableInteractions?: boolean; // Mouse zoom/pan interactions (default: true)
     enableWorker?: boolean; // Create streaming worker (default: true)
@@ -55,15 +57,6 @@ export interface ErosBinaryCurve {
     sampleRate: number;
     values: Float32Array;
     version: number;
-}
-
-export type ErosChartDisplayMode = 'analysis' | 'live-strip';
-
-export interface ErosChartViewportStrategyState {
-    displayMode: ErosChartDisplayMode;
-    followLatest: boolean;
-    liveWindowDurationSeconds: number;
-    isFrozen: boolean;
 }
 
 export class ErosChart {
@@ -90,14 +83,6 @@ export class ErosChart {
     // === Viewport (Zoom/Pan) ===
     private viewportStart = 0;
     private viewportEnd = 0;
-
-    // === Display Mode / Viewport Strategy (P0 foundation; live-strip viewport math follows in a later slice) ===
-    private displayMode: ErosChartDisplayMode = 'analysis';
-    private viewportStrategy = {
-        followLatest: false,
-        liveWindowDurationSeconds: 10,
-        isFrozen: false,
-    };
 
     /**
      * Erstellt einen neuen ErosChart
@@ -127,6 +112,8 @@ export class ErosChart {
             snapRadiusPx: options.snapRadiusPx ?? 14,
             snapIndicatorRadiusPx: options.snapIndicatorRadiusPx ?? 5,
             showGrid: options.showGrid ?? true,
+            showXAxisGrid: options.showXAxisGrid ?? true,
+            showXAxisTitle: options.showXAxisTitle ?? true,
             showCrosshair: options.showCrosshair ?? true,
             enableInteractions: options.enableInteractions ?? true,
             enableWorker: options.enableWorker ?? true,
@@ -163,7 +150,10 @@ export class ErosChart {
 
         // ========== GRID OVERLAY ==========
         if (this.options.showGrid) {
-            this.gridOverlay = new GridOverlay(this.canvas);
+            this.gridOverlay = new GridOverlay(this.canvas, {
+                showXAxisGrid: this.options.showXAxisGrid,
+                showXAxisTitle: this.options.showXAxisTitle,
+            });
         }
 
         // ========== CROSSHAIR OVERLAY ==========
@@ -294,79 +284,6 @@ export class ErosChart {
 
     public setViewportChangeListener(listener: ((startIndex: number, endIndex: number) => void) | null): void {
         this.viewportChangeListener = listener;
-    }
-
-    public setDisplayMode(mode: ErosChartDisplayMode): void {
-        if (this.displayMode === mode) {
-            return;
-        }
-
-        this.displayMode = mode;
-
-        if (mode === 'analysis') {
-            this.viewportStrategy.followLatest = false;
-            this.viewportStrategy.isFrozen = false;
-            return;
-        }
-
-        // Live-strip defaults to follow-latest unless explicitly frozen later.
-        if (!this.viewportStrategy.isFrozen) {
-            this.viewportStrategy.followLatest = true;
-        }
-    }
-
-    public getDisplayMode(): ErosChartDisplayMode {
-        return this.displayMode;
-    }
-
-    public setFollowLatest(enabled: boolean): void {
-        this.viewportStrategy.followLatest = enabled;
-        if (enabled) {
-            this.viewportStrategy.isFrozen = false;
-        }
-    }
-
-    public getFollowLatest(): boolean {
-        return this.viewportStrategy.followLatest;
-    }
-
-    public setLiveWindowDuration(seconds: number): void {
-        if (!Number.isFinite(seconds) || seconds <= 0) {
-            return;
-        }
-
-        this.viewportStrategy.liveWindowDurationSeconds = seconds;
-    }
-
-    public getLiveWindowDuration(): number {
-        return this.viewportStrategy.liveWindowDurationSeconds;
-    }
-
-    public freeze(): void {
-        if (this.displayMode !== 'live-strip') {
-            return;
-        }
-
-        this.viewportStrategy.isFrozen = true;
-        this.viewportStrategy.followLatest = false;
-    }
-
-    public resumeFollowLatest(): void {
-        if (this.displayMode !== 'live-strip') {
-            return;
-        }
-
-        this.viewportStrategy.isFrozen = false;
-        this.viewportStrategy.followLatest = true;
-    }
-
-    public getViewportStrategyState(): ErosChartViewportStrategyState {
-        return {
-            displayMode: this.displayMode,
-            followLatest: this.viewportStrategy.followLatest,
-            liveWindowDurationSeconds: this.viewportStrategy.liveWindowDurationSeconds,
-            isFrozen: this.viewportStrategy.isFrozen,
-        };
     }
 
     public setLineColor(lineColor: string): void {
@@ -561,7 +478,6 @@ export class ErosChart {
         // ========== ZOOM (Mausrad) ==========
         this.canvas.addEventListener('wheel', (e) => {
             e.preventDefault();
-            this.freezeLiveStripForManualViewportInteraction();
 
             const rect = this.canvas.getBoundingClientRect();
             const mouseX = (e.clientX - rect.left) / rect.width;  // 0..1
@@ -612,7 +528,6 @@ export class ErosChart {
 
         window.addEventListener('mousemove', (e) => {
             if (!isDragging) return;
-            this.freezeLiveStripForManualViewportInteraction();
 
             const rect = this.canvas.getBoundingClientRect();
             const deltaX = e.clientX - dragStartX;
@@ -679,8 +594,6 @@ export class ErosChart {
         let lastGridUpdate = 0;
 
         const frame = (now: number) => {
-            this.applyViewportStrategyFrame();
-
             // WebGPU Rendering (jeden Frame)
             this.renderer?.render();
 
@@ -729,67 +642,6 @@ export class ErosChart {
         };
 
         this.animationFrameId = requestAnimationFrame(frame);
-    }
-
-    /**
-     * Display-mode-dependent viewport policy hook (e.g. live-strip follow-latest).
-     */
-    private applyViewportStrategyFrame(): void {
-        if (this.displayMode !== 'live-strip') {
-            return;
-        }
-
-        if (this.viewportStrategy.isFrozen || !this.viewportStrategy.followLatest) {
-            return;
-        }
-
-        if (!this.ringBuffer || !this.renderer) {
-            return;
-        }
-
-        const nextViewport = this.computeLiveStripFollowLatestViewport(this.ringBuffer.currentHead);
-        if (
-            nextViewport.startIndex === this.viewportStart &&
-            nextViewport.endIndex === this.viewportEnd
-        ) {
-            return;
-        }
-
-        this.setViewport(nextViewport.startIndex, nextViewport.endIndex);
-    }
-
-    private freezeLiveStripForManualViewportInteraction(): void {
-        if (this.displayMode !== 'live-strip') {
-            return;
-        }
-
-        if (this.viewportStrategy.isFrozen) {
-            return;
-        }
-
-        this.freeze();
-    }
-
-    private computeLiveStripFollowLatestViewport(currentHead: number): { startIndex: number; endIndex: number } {
-        const safeCurrentHead = Math.max(0, Math.min(currentHead, this.options.bufferSize));
-        const safeSampleRate = Math.max(1, this.options.sampleRate);
-        const requestedWindowSamples = Math.round(this.viewportStrategy.liveWindowDurationSeconds * safeSampleRate);
-        const windowSamples = Math.max(1, Math.min(this.options.bufferSize, requestedWindowSamples));
-
-        if (safeCurrentHead <= 0) {
-            return {
-                startIndex: 0,
-                endIndex: 1,
-            };
-        }
-
-        const endIndex = Math.max(1, safeCurrentHead);
-        const startIndex = Math.max(0, endIndex - windowSamples);
-
-        return {
-            startIndex,
-            endIndex: Math.max(startIndex + 1, endIndex),
-        };
     }
 
     private static encodeBinary(values: Float32Array, sampleRate: number): ArrayBuffer {

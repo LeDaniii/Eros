@@ -5,14 +5,17 @@
  */
 
 // === Main API ===
-export { ErosChart } from './api/ErosChart';
+export { ErosChart } from './charts/ErosChart';
 export type {
     ErosChartOptions,
     StreamOptions,
-    ErosBinaryCurve,
-    ErosChartDisplayMode,
-    ErosChartViewportStrategyState
-} from './api/ErosChart';
+    ErosBinaryCurve
+} from './charts/ErosChart';
+export { ErosStripChart } from './charts/ErosStripChart';
+export type {
+    ErosStripChartOptions,
+    ErosStripChartViewportStrategyState
+} from './charts/ErosStripChart';
 
 // === Advanced Components (falls jemand direkt darauf zugreifen will) ===
 export { WebGPURenderer } from './renderer/WebGPURenderer';

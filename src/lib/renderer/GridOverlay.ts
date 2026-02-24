@@ -3,11 +3,18 @@
  */
 import { getPlotRect } from './plotLayout';
 
+export interface GridOverlayOptions {
+    showXAxisGrid?: boolean;
+    showXAxisTitle?: boolean;
+}
+
 export class GridOverlay {
     private overlayCanvas: HTMLCanvasElement;
     private ctx: CanvasRenderingContext2D;
+    private showXAxisGrid: boolean;
+    private showXAxisTitle: boolean;
 
-    constructor(mainCanvas: HTMLCanvasElement) {
+    constructor(mainCanvas: HTMLCanvasElement, options: GridOverlayOptions = {}) {
         this.overlayCanvas = document.createElement('canvas');
         this.overlayCanvas.width = mainCanvas.width;
         this.overlayCanvas.height = mainCanvas.height;
@@ -25,6 +32,8 @@ export class GridOverlay {
             throw new Error('Canvas2D context is not available');
         }
         this.ctx = ctx;
+        this.showXAxisGrid = options.showXAxisGrid ?? true;
+        this.showXAxisTitle = options.showXAxisTitle ?? true;
     }
 
     /**
@@ -62,14 +71,18 @@ export class GridOverlay {
         this.ctx.font = '11px monospace';
 
         this.drawYGrid(minValue, maxValue, plotLeft, plotRight, plotTop, plotBottom, plotHeight);
-        this.drawXGrid(totalSamples, sampleRate, startSampleIndex, plotLeft, plotTop, plotBottom, plotWidth);
+        if (this.showXAxisGrid) {
+            this.drawXGrid(totalSamples, sampleRate, startSampleIndex, plotLeft, plotTop, plotBottom, plotWidth);
+        }
 
         this.ctx.fillStyle = '#fff';
         this.ctx.font = 'bold 12px sans-serif';
         this.ctx.textAlign = 'left';
         this.ctx.textBaseline = 'top';
         this.ctx.fillText('Value', 5, 5);
-        this.ctx.fillText('Time (s)', Math.max(plotLeft, width - 75), plotBottom + 6);
+        if (this.showXAxisTitle) {
+            this.ctx.fillText('Time (s)', Math.max(plotLeft, width - 75), plotBottom + 6);
+        }
     }
 
     resize(width: number, height: number): void {

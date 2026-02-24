@@ -2,12 +2,23 @@
  * Demo app for Eros Charts
  */
 
-import { ErosChart, type ErosBinaryCurve, type ErosChartDisplayMode } from './lib/api/ErosChart';
+import { ErosChart, type ErosBinaryCurve } from './lib/charts/ErosChart';
+import { ErosStripChart } from './lib/charts/ErosStripChart';
 
 // ==========================================
 // GLOBAL STATE
 // ==========================================
-let chart: ErosChart | null = null;
+type DemoDisplayMode = 'analysis' | 'live-strip';
+type DemoChart = ErosChart | ErosStripChart;
+
+interface DemoViewportStrategyState {
+    displayMode: DemoDisplayMode;
+    followLatest: boolean;
+    liveWindowDurationSeconds: number;
+    isFrozen: boolean;
+}
+
+let chart: DemoChart | null = null;
 let isStreaming = false;
 let currentViewMode: 'idle' | 'live' | 'binary' = 'idle';
 let binaryOverlayCharts: ErosChart[] = [];
@@ -25,7 +36,7 @@ interface ImportedBinaryEntry {
 let importedBinaryEntries: ImportedBinaryEntry[] = [];
 
 const displayModePreferences: {
-    mode: ErosChartDisplayMode;
+    mode: DemoDisplayMode;
     liveWindowSeconds: number;
 } = {
     mode: 'analysis',
@@ -184,15 +195,30 @@ function updateDataStats(): void {
     }
 }
 
-function applyDisplayModePreferencesToChart(targetChart: ErosChart): void {
-    targetChart.setLiveWindowDuration(displayModePreferences.liveWindowSeconds);
-    targetChart.setDisplayMode(displayModePreferences.mode);
+function isStripChartInstance(value: DemoChart | null): value is ErosStripChart {
+    return value instanceof ErosStripChart;
+}
 
-    if (displayModePreferences.mode === 'live-strip') {
-        targetChart.resumeFollowLatest();
-    } else {
-        targetChart.setFollowLatest(false);
+function getViewportStrategyStateForUi(): DemoViewportStrategyState {
+    if (isStripChartInstance(chart)) {
+        return chart.getViewportStrategyState();
     }
+
+    return {
+        displayMode: 'analysis',
+        followLatest: false,
+        liveWindowDurationSeconds: displayModePreferences.liveWindowSeconds,
+        isFrozen: false,
+    };
+}
+
+function applyDisplayModePreferencesToChart(targetChart: DemoChart): void {
+    if (!isStripChartInstance(targetChart)) {
+        return;
+    }
+
+    targetChart.setLiveWindowDuration(displayModePreferences.liveWindowSeconds);
+    targetChart.resumeFollowLatest();
 }
 
 function refreshDisplayModeControls(): void {
@@ -207,7 +233,7 @@ function refreshDisplayModeControls(): void {
     }
 
     const hasChart = chart !== null;
-    const strategyState = chart?.getViewportStrategyState() ?? {
+    const strategyState = chart ? getViewportStrategyStateForUi() : {
         displayMode: displayModePreferences.mode,
         followLatest: false,
         liveWindowDurationSeconds: displayModePreferences.liveWindowSeconds,
@@ -226,8 +252,9 @@ function refreshDisplayModeControls(): void {
     setModeButtonStyle(liveStripBtn, strategyState.displayMode === 'live-strip');
 
     analysisBtn.disabled = !hasChart;
-    liveStripBtn.disabled = !hasChart;
-    liveWindowSelect.disabled = !hasChart;
+    // Live strip can initialize a chart on demand (pre-stream), so keep it clickable.
+    liveStripBtn.disabled = false;
+    liveWindowSelect.disabled = hasChart && strategyState.displayMode === 'live-strip';
 
     const liveStripActive = hasChart && strategyState.displayMode === 'live-strip';
     freezeBtn.disabled = !liveStripActive;
@@ -247,7 +274,7 @@ function refreshDisplayModeControls(): void {
         : 'Mode: no chart';
 }
 
-async function createOrReplaceChart(sampleRate: number, bufferSize: number): Promise<ErosChart> {
+async function createOrReplaceAnalysisChart(sampleRate: number, bufferSize: number): Promise<ErosChart> {
     destroyBinaryOverlayCharts();
 
     const baseCanvas = document.getElementById('plotCanvas');
@@ -268,10 +295,45 @@ async function createOrReplaceChart(sampleRate: number, bufferSize: number): Pro
     });
 
     await nextChart.initialize();
+    chart = nextChart;
+    refreshDisplayModeControls();
+    return nextChart;
+}
+
+async function createOrReplaceStripChart(sampleRate: number, bufferSize: number): Promise<ErosStripChart> {
+    destroyBinaryOverlayCharts();
+
+    const baseCanvas = document.getElementById('plotCanvas');
+    if (baseCanvas instanceof HTMLCanvasElement) {
+        baseCanvas.style.opacity = '1';
+    }
+
+    if (chart) {
+        chart.setViewportChangeListener(null);
+        chart.destroy();
+    }
+
+    const nextChart = new ErosStripChart('#plotCanvas', {
+        grpcUrl: DEFAULT_GRPC_URL,
+        bufferSize,
+        sampleRate,
+        lineColor: '#0080ff',
+        liveWindowDurationSeconds: displayModePreferences.liveWindowSeconds,
+    });
+
+    await nextChart.initialize();
     applyDisplayModePreferencesToChart(nextChart);
     chart = nextChart;
     refreshDisplayModeControls();
     return nextChart;
+}
+
+async function createOrReplaceStreamingChart(sampleRate: number, bufferSize: number): Promise<DemoChart> {
+    if (displayModePreferences.mode === 'live-strip') {
+        return createOrReplaceStripChart(sampleRate, bufferSize);
+    }
+
+    return createOrReplaceAnalysisChart(sampleRate, bufferSize);
 }
 
 function destroyBinaryOverlayCharts(): void {
@@ -640,25 +702,59 @@ function setupButtonHandlers(): void {
         handleBinaryCurveControlChange(event.target, false);
     });
 
-    displayModeAnalysisBtn.addEventListener('click', () => {
+    displayModeAnalysisBtn.addEventListener('click', async () => {
         displayModePreferences.mode = 'analysis';
-        chart?.setDisplayMode('analysis');
+
+        if (isStripChartInstance(chart)) {
+            try {
+                const duration = Math.max(1, Number.parseFloat(durationInput.value) || 30);
+                const sampleRate = Math.max(1, Number.parseInt(sampleRateInput.value, 10) || 10_000);
+                const bufferSize = Math.ceil(duration * sampleRate * 1.1);
+
+                updateStatus('Creating analysis chart...');
+                await createOrReplaceAnalysisChart(sampleRate, bufferSize);
+                setViewMode('live');
+            } catch (error: unknown) {
+                const message = error instanceof Error ? error.message : String(error);
+                updateStatus(`Analysis chart init failed: ${message}`);
+                refreshDisplayModeControls();
+                return;
+            }
+        }
+
         refreshDisplayModeControls();
         if (chart) {
             updateStatus('Display mode: analysis');
         }
     });
 
-    displayModeLiveStripBtn.addEventListener('click', () => {
+    displayModeLiveStripBtn.addEventListener('click', async () => {
         const selectedWindow = Number.parseFloat(liveWindowSelect.value);
         if (Number.isFinite(selectedWindow) && selectedWindow > 0) {
             displayModePreferences.liveWindowSeconds = selectedWindow;
         }
         displayModePreferences.mode = 'live-strip';
 
-        if (chart) {
+        if (!chart || !isStripChartInstance(chart)) {
+            try {
+                const duration = Math.max(1, Number.parseFloat(durationInput.value) || 30);
+                const sampleRate = Math.max(1, Number.parseInt(sampleRateInput.value, 10) || 10_000);
+                const bufferSize = Math.ceil(duration * sampleRate * 1.1);
+
+                updateStatus('Creating live strip chart...');
+                await createOrReplaceStripChart(sampleRate, bufferSize);
+                setViewMode('live');
+                updateStatus(`Live strip ready (${displayModePreferences.liveWindowSeconds}s window) | Click START STREAM`);
+            } catch (error: unknown) {
+                const message = error instanceof Error ? error.message : String(error);
+                updateStatus(`Live strip init failed: ${message}`);
+                refreshDisplayModeControls();
+                return;
+            }
+        }
+
+        if (isStripChartInstance(chart)) {
             chart.setLiveWindowDuration(displayModePreferences.liveWindowSeconds);
-            chart.setDisplayMode('live-strip');
             chart.resumeFollowLatest();
             updateStatus(`Display mode: live strip (${displayModePreferences.liveWindowSeconds}s window)`);
         }
@@ -673,27 +769,23 @@ function setupButtonHandlers(): void {
         }
 
         displayModePreferences.liveWindowSeconds = selectedWindow;
-        if (chart) {
+        if (isStripChartInstance(chart)) {
             chart.setLiveWindowDuration(selectedWindow);
             const strategy = chart.getViewportStrategyState();
-            if (strategy.displayMode === 'live-strip' && strategy.followLatest && !strategy.isFrozen) {
+            if (strategy.followLatest && !strategy.isFrozen) {
                 chart.resumeFollowLatest();
             }
-            updateStatus(`Live strip window set to ${selectedWindow}s`);
+            updateStatus(`Live strip window fixed at ${strategy.liveWindowDurationSeconds}s`);
         }
         refreshDisplayModeControls();
     });
 
     liveFreezeBtn.addEventListener('click', () => {
-        if (!chart) {
+        if (!isStripChartInstance(chart)) {
             return;
         }
 
         const strategy = chart.getViewportStrategyState();
-        if (strategy.displayMode !== 'live-strip') {
-            return;
-        }
-
         if (strategy.isFrozen) {
             chart.resumeFollowLatest();
             updateStatus('Live strip follow resumed');
@@ -715,7 +807,7 @@ function setupButtonHandlers(): void {
             updateStatus('Creating new chart...');
 
             const bufferSize = Math.ceil(duration * sampleRate * 1.1);
-            const activeChart = await createOrReplaceChart(sampleRate, bufferSize);
+            const activeChart = await createOrReplaceStreamingChart(sampleRate, bufferSize);
 
             updateStatus('Configuring server...');
             await activeChart.startStream({ duration });
