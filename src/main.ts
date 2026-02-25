@@ -95,20 +95,23 @@ function startBooleanStripHoldSampler(): void {
             booleanStripHoldLastTickMs = nowMs;
         }
 
-        let deltaMs = nowMs - booleanStripHoldLastTickMs;
+        const deltaMs = Math.max(0, nowMs - booleanStripHoldLastTickMs);
         booleanStripHoldLastTickMs = nowMs;
 
-        // Nach Tab-Pausen kein großes Catch-up rendern.
-        if (deltaMs > 250) {
-            deltaMs = samplePeriodMs;
-            booleanStripHoldAccumulatorMs = 0;
-        }
-
-        booleanStripHoldAccumulatorMs += Math.max(0, deltaMs);
+        // Browser pausiert requestAnimationFrame in Hintergrund-Tabs.
+        // Beim Zurückkommen ziehen wir die fehlende Zeit nach, damit der rechte Rand wieder
+        // den aktuellen Zustand zeigt. Begrenzung auf Puffergröße vermeidet unnötige Arbeit
+        // nach sehr langen Pausen (ältere Daten sind ohnehin aus dem Strip-Buffer gefallen).
+        booleanStripHoldAccumulatorMs += deltaMs;
         let samplesToEmit = Math.floor(booleanStripHoldAccumulatorMs / samplePeriodMs);
 
         if (samplesToEmit > 0) {
-            booleanStripHoldAccumulatorMs -= samplesToEmit * samplePeriodMs;
+            if (samplesToEmit > BOOLEAN_STRIP_BUFFER_SIZE) {
+                samplesToEmit = BOOLEAN_STRIP_BUFFER_SIZE;
+                booleanStripHoldAccumulatorMs = 0;
+            } else {
+                booleanStripHoldAccumulatorMs -= samplesToEmit * samplePeriodMs;
+            }
             appendBooleanStripSamples(booleanStripCurrentValue, samplesToEmit);
         }
 
