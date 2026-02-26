@@ -1,4 +1,5 @@
 import * as http from "node:http";
+import { once } from "node:events";
 import { connectNodeAdapter } from "@connectrpc/connect-node";
 import { create } from "@bufbuild/protobuf";
 import {
@@ -6,10 +7,18 @@ import {
     MeasurementBatchSchema,
     BooleanStatusTickSchema,
 } from "./gen/measurements_pb.js";
+import { createReadStream, statSync } from "node:fs";
 
 // ========================
 // Kurven-Generator (aus dem File-Script kopiert)
 // ========================
+
+const EROS_BINARY_MAGIC = new Uint8Array([0x45, 0x52, 0x4f, 0x53]); // "EROS"
+const EROS_BINARY_VERSION = 1;
+const EROS_BINARY_HEADER_SIZE = 20;
+const EROS_BINARY_MAX_SAMPLE_COUNT = 0xffffffff;
+const EROS_BINARY_MAX_FILE_SIZE_BYTES = EROS_BINARY_HEADER_SIZE + EROS_BINARY_MAX_SAMPLE_COUNT * 4;
+const DEMO_BINARY_PATTERN_SAMPLE_COUNT = 262_144; // 1 MiB float payload chunk
 
 function createMulberry32Random(seedNumber) {
     let internalState = seedNumber >>> 0;
@@ -328,19 +337,216 @@ const handler = connectNodeAdapter({ routes });
 
 const allowedOrigins = [
     "https://localhost:5173",
-    "http://localhost:5173",
+    "http://localhost:5173"
 ];
 
 const allowedHeaders =
     "Content-Type, Connect-Protocol-Version, Connect-Timeout-Ms, Grpc-Timeout, Authorization";
+const exposedHeaders = "Content-Length, Content-Disposition, X-File-Name";
+
+function isLanOrLocalhostOrigin(origin) {
+    if (!origin) return false;
+
+    try {
+        const parsedOrigin = new URL(origin);
+        const hostname = parsedOrigin.hostname;
+
+        if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") {
+            return true;
+        }
+
+        if (/^10\.\d+\.\d+\.\d+$/.test(hostname)) return true;
+        if (/^192\.168\.\d+\.\d+$/.test(hostname)) return true;
+
+        const private172 = hostname.match(/^172\.(\d+)\.\d+\.\d+$/);
+        if (private172) {
+            const secondOctet = Number(private172[1]);
+            return secondOctet >= 16 && secondOctet <= 31;
+        }
+
+        return false;
+    } catch {
+        return false;
+    }
+}
+
+function parsePositiveNumber(value) {
+    if (value === null || value === undefined || value === "") {
+        return null;
+    }
+
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+        return null;
+    }
+
+    return parsed;
+}
+
+function parseDemoBinaryRequestParams(requestUrl, fallbackSampleRateHz = 10_000) {
+    const url = new URL(requestUrl ?? "/", "http://localhost");
+    const sizeParam = url.searchParams.get("size");
+    const sizeBytesParam = url.searchParams.get("sizeBytes");
+    const unitParam = (url.searchParams.get("unit") ?? "gb").toLowerCase();
+
+    const unitMultipliers = {
+        b: 1,
+        byte: 1,
+        bytes: 1,
+        kb: 1024,
+        mb: 1024 ** 2,
+        gb: 1024 ** 3,
+    };
+
+    let requestedBytes = null;
+
+    if (sizeBytesParam !== null) {
+        requestedBytes = Math.floor(parsePositiveNumber(sizeBytesParam) ?? NaN);
+    } else {
+        const sizeValue = parsePositiveNumber(sizeParam ?? "2");
+        const multiplier = unitMultipliers[unitParam];
+        if (sizeValue !== null && multiplier) {
+            requestedBytes = Math.floor(sizeValue * multiplier);
+        }
+    }
+
+    if (!Number.isFinite(requestedBytes) || requestedBytes === null) {
+        throw new Error("Ungültige Zielgröße. Verwende z.B. ?size=2&unit=gb");
+    }
+
+    if (requestedBytes < EROS_BINARY_HEADER_SIZE + 4) {
+        throw new Error(`Zielgröße zu klein (mindestens ${EROS_BINARY_HEADER_SIZE + 4} Bytes).`);
+    }
+
+    if (requestedBytes > EROS_BINARY_MAX_FILE_SIZE_BYTES) {
+        throw new Error(`Zielgröße zu groß (max ${EROS_BINARY_MAX_FILE_SIZE_BYTES} Bytes).`);
+    }
+
+    const requestedSampleRate = Math.floor(
+        parsePositiveNumber(url.searchParams.get("sampleRateHz")) ?? fallbackSampleRateHz
+    );
+    const sampleRateHz = Math.max(1, Math.min(requestedSampleRate, 2_000_000_000));
+
+    const sampleCount = Math.floor((requestedBytes - EROS_BINARY_HEADER_SIZE) / 4);
+    const actualBytes = EROS_BINARY_HEADER_SIZE + sampleCount * 4;
+    const durationSeconds = sampleCount / sampleRateHz;
+
+    return {
+        requestedBytes,
+        actualBytes,
+        sampleCount,
+        sampleRateHz,
+        durationSeconds,
+        unitParam,
+    };
+}
+
+function createErosBinaryHeaderBuffer(sampleRateHz, sampleCount) {
+    const headerBuffer = Buffer.alloc(EROS_BINARY_HEADER_SIZE);
+    headerBuffer.set(EROS_BINARY_MAGIC, 0);
+    headerBuffer.writeUInt16LE(EROS_BINARY_VERSION, 4);
+    headerBuffer.writeUInt16LE(0, 6); // flags/reserved
+    headerBuffer.writeUInt32LE(sampleRateHz >>> 0, 8);
+    headerBuffer.writeUInt32LE(sampleCount >>> 0, 12);
+    headerBuffer.writeUInt32LE(0, 16); // reserved
+    return headerBuffer;
+}
+
+function createDemoBinaryPatternBuffer(sampleRateHz) {
+    const sampleCount = DEMO_BINARY_PATTERN_SAMPLE_COUNT;
+    const payloadBuffer = new ArrayBuffer(sampleCount * 4);
+    const view = new DataView(payloadBuffer);
+    const twoPi = Math.PI * 2;
+    const effectiveSampleRateHz = Math.max(1, sampleRateHz);
+    let lcgState = 0xA5F153C1;
+
+    for (let i = 0; i < sampleCount; i++) {
+        lcgState = (Math.imul(lcgState, 1664525) + 1013904223) >>> 0;
+        const noise = ((lcgState & 0xffff) / 0xffff) * 2 - 1;
+        const t = i / effectiveSampleRateHz;
+
+        let value =
+            0.92 * Math.sin(twoPi * 3.2 * t) +
+            0.18 * Math.sin(twoPi * 117 * t + 0.31) +
+            0.06 * Math.sin(twoPi * 1410 * t + 1.17) +
+            0.025 * noise;
+
+        // Short periodic pulses so overlays/zooming still show visible events.
+        const pulsePosition = i % 8192;
+        if (pulsePosition < 12) {
+            value += (12 - pulsePosition) * 0.12;
+        }
+
+        view.setFloat32(i * 4, clampNumber(value, -2.5, 2.5), true);
+    }
+
+    return Buffer.from(payloadBuffer);
+}
+
+async function writeChunkWithBackpressure(response, chunkBuffer) {
+    if (response.destroyed || response.writableEnded) {
+        return false;
+    }
+
+    if (response.write(chunkBuffer)) {
+        return true;
+    }
+
+    await Promise.race([
+        once(response, "drain"),
+        once(response, "close"),
+    ]);
+
+    return !(response.destroyed || response.writableEnded);
+}
+
+async function streamDemoBinaryFile(response, options) {
+    const { sampleRateHz, sampleCount, actualBytes } = options;
+    const headerBuffer = createErosBinaryHeaderBuffer(sampleRateHz, sampleCount);
+    const payloadPatternBuffer = createDemoBinaryPatternBuffer(sampleRateHz);
+    const payloadPatternSampleCount = payloadPatternBuffer.byteLength / 4;
+
+    response.statusCode = 200;
+    response.setHeader("Content-Type", "application/octet-stream");
+    response.setHeader("Content-Length", String(actualBytes));
+    response.setHeader("Cache-Control", "no-store");
+
+    const fileName =
+        `eros-demo-${Math.round(actualBytes / (1024 * 1024))}MiB-${sampleRateHz}Hz.erosb`;
+    response.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    response.setHeader("X-File-Name", fileName);
+
+    let writeOk = await writeChunkWithBackpressure(response, headerBuffer);
+    if (!writeOk) {
+        return;
+    }
+
+    let remainingSamples = sampleCount;
+    while (remainingSamples > 0) {
+        const chunkSamples = Math.min(remainingSamples, payloadPatternSampleCount);
+        const chunkBytes = chunkSamples * 4;
+        const chunkBuffer = chunkSamples === payloadPatternSampleCount
+            ? payloadPatternBuffer
+            : payloadPatternBuffer.subarray(0, chunkBytes);
+
+        writeOk = await writeChunkWithBackpressure(response, chunkBuffer);
+        if (!writeOk) {
+            return;
+        }
+
+        remainingSamples -= chunkSamples;
+    }
+
+    response.end();
+}
 
 startBooleanStatusTicker();
 
 http.createServer((request, response) => {
     const origin = request.headers.origin || "";
 
-    // Erlaubt alle localhost Origins
-    if (allowedOrigins.includes(origin)) {
+    // Erlaubt localhost und private LAN-IPs fuer Browser im lokalen Netz
+    if (allowedOrigins.includes(origin) || isLanOrLocalhostOrigin(origin)) {
         response.setHeader("Access-Control-Allow-Origin", origin);
     } else {
         response.setHeader("Access-Control-Allow-Origin", allowedOrigins[0]);
@@ -349,6 +555,7 @@ http.createServer((request, response) => {
     response.setHeader("Vary", "Origin");
     response.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
     response.setHeader("Access-Control-Allow-Headers", allowedHeaders);
+    response.setHeader("Access-Control-Expose-Headers", exposedHeaders);
 
     if (request.method === "OPTIONS") {
         response.statusCode = 204;
@@ -403,9 +610,60 @@ http.createServer((request, response) => {
         return;
     }
 
+    if (request.method === "GET" && request.url?.startsWith("/api/generate-demo-binary")) {
+        let requestOptions;
+
+        try {
+            requestOptions = parseDemoBinaryRequestParams(request.url, streamConfig.sampleRateHz);
+        } catch (error) {
+            response.statusCode = 400;
+            response.setHeader("Content-Type", "application/json");
+            response.end(JSON.stringify({
+                error: error instanceof Error ? error.message : String(error),
+            }));
+            return;
+        }
+
+        console.log(
+            `[DemoBinary] Streaming ${requestOptions.actualBytes} bytes ` +
+            `(${requestOptions.sampleCount} samples @ ${requestOptions.sampleRateHz} Hz, ` +
+            `${requestOptions.durationSeconds.toFixed(2)} s)`
+        );
+
+        void streamDemoBinaryFile(response, requestOptions).catch((error) => {
+            console.error("[DemoBinary] Stream failed:", error);
+            if (!response.headersSent) {
+                response.statusCode = 500;
+                response.setHeader("Content-Type", "application/json");
+                response.end(JSON.stringify({ error: "Demo-Binary-Generierung fehlgeschlagen." }));
+                return;
+            }
+
+            if (!response.writableEnded) {
+                response.destroy(error);
+            }
+        });
+
+        return;
+    }
+
+    if (request.method === "GET" && request.url === "/api/download") {
+        const filePath = "C:\\Users\\dmatzer\\Downloads\\eros-curve-2026-02-23T22-02-18-167Z.erosb";
+        const stats = statSync(filePath);
+
+        response.statusCode = 200;
+        response.setHeader("Content-Type", "application/octet-stream");
+        response.setHeader("Content-Length", String(stats.size));
+        response.setHeader("Content-Disposition", 'attachment; filename="eros-curve.erosb"');
+        response.setHeader("X-File-Name", "eros-curve.erosb");
+
+        createReadStream(filePath).pipe(response);
+        return;
+    }
+
     // gRPC handler
     handler(request, response);
-}).listen(50051, () => {
+}).listen(50051, "0.0.0.0", () => {
     console.log("Server läuft auf http://localhost:50051");
     console.log("REST API: POST /api/configure, GET /api/status");
     console.log("RPC: StreamMeasurements, StreamBooleanStatus");

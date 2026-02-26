@@ -349,6 +349,32 @@ function createControlPanel(): HTMLDivElement {
                 style="width: 100%; margin-top: 8px; padding: 8px; background: #1f3f6f; color: #d5e8ff; border: 1px solid #4aa3ff; cursor: pointer; font-weight: bold; font-size: 12px; border-radius: 5px;">
             LOAD .EROSB
         </button>
+        <button id="loadBinaryBtnServer"
+             style="width: 100%; margin-top: 8px; padding: 8px; background: #1f3f6f; color: #d5e8ff; border: 1px solid #4aa3ff; cursor: pointer; font-weight: bold; font-size: 12px; border-radius: 5px;">
+         LOAD .EROSB from server
+        </button>
+        <div style="margin-top: 10px; border: 1px solid #3f5c1f; border-radius: 6px; padding: 8px; background: rgba(22, 35, 10, 0.65);">
+            <div style="font-size: 11px; color: #b9f27c; margin-bottom: 6px; font-weight: bold;">DEMO BINARY GENERATOR</div>
+            <div style="display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: center;">
+                <input id="demoBinarySizeInput" type="number" min="1" step="0.1" value="2"
+                       style="min-width:0; padding: 6px; background: #1b2411; color: #e9ffd0; border: 1px solid #6cab35; font-family: monospace; font-size: 12px;" />
+                <select id="demoBinarySizeUnit"
+                        style="padding: 6px; background: #1b2411; color: #e9ffd0; border: 1px solid #6cab35; font-family: monospace; font-size: 12px;">
+                    <option value="gb" selected>GB</option>
+                    <option value="mb">MB</option>
+                </select>
+            </div>
+            <div id="demoBinaryEstimate" style="margin-top: 6px; font-size: 10px; color: #b5c89c; line-height: 1.25;">
+                Estimate pending...
+            </div>
+            <button id="generateDemoBinaryBtn"
+                    style="width: 100%; margin-top: 8px; padding: 8px; background: #355f12; color: #ecffd7; border: 1px solid #8fe23d; cursor: pointer; font-weight: bold; font-size: 12px; border-radius: 5px;">
+                GENERATE DEMO .EROSB
+            </button>
+            <div style="margin-top: 5px; font-size: 9px; color: #8ea77a; line-height: 1.2;">
+                Creates a valid demo file on the server and downloads it directly (no pre-buffering in UI).
+            </div>
+        </div>
         <input id="loadBinaryInput" type="file" accept=".erosb,application/octet-stream" multiple style="display: none;" />
         <div id="binaryBrowserPanel" style="display: none; margin-top: 10px; border: 1px solid #2d4f7a; border-radius: 6px; padding: 8px; background: rgba(20, 35, 55, 0.7);">
             <div id="binaryBrowserTitle" style="font-size: 11px; color: #8cc4ff; margin-bottom: 6px; font-weight: bold;">
@@ -1029,6 +1055,41 @@ function formatBinaryDuration(seconds: number): string {
     return `${seconds.toFixed(4)}s`;
 }
 
+function formatBinarySize(bytes: number): string {
+    if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    let value = bytes;
+    let unitIndex = 0;
+
+    while (value >= 1024 && unitIndex < units.length - 1) {
+        value /= 1024;
+        unitIndex++;
+    }
+
+    const decimals = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+    return `${value.toFixed(decimals)} ${units[unitIndex]}`;
+}
+
+function formatDemoGenerationDuration(seconds: number): string {
+    if (!Number.isFinite(seconds) || seconds < 0) return '0s';
+    if (seconds < 60) return formatBinaryDuration(seconds);
+
+    const totalSeconds = Math.round(seconds);
+    const days = Math.floor(totalSeconds / 86400);
+    const hours = Math.floor((totalSeconds % 86400) / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const remainingSeconds = totalSeconds % 60;
+    const parts: string[] = [];
+
+    if (days > 0) parts.push(`${days}d`);
+    if (hours > 0 || parts.length > 0) parts.push(`${hours}h`);
+    if (minutes > 0 || parts.length > 0) parts.push(`${minutes}m`);
+    if (parts.length < 2) parts.push(`${remainingSeconds}s`);
+
+    return parts.join(' ');
+}
+
 function escapeHtml(value: string): string {
     return value
         .replace(/&/g, '&amp;')
@@ -1255,6 +1316,11 @@ function setupButtonHandlers(): void {
     const startBtn = document.getElementById('startBtn') as HTMLButtonElement;
     const resetZoomBtn = document.getElementById('resetZoomBtn') as HTMLButtonElement;
     const downloadBinaryBtn = document.getElementById('downloadBinaryBtn') as HTMLButtonElement;
+    const loadBinaryBtnServer = document.getElementById('loadBinaryBtnServer') as HTMLButtonElement;
+    const generateDemoBinaryBtn = document.getElementById('generateDemoBinaryBtn') as HTMLButtonElement;
+    const demoBinarySizeInput = document.getElementById('demoBinarySizeInput') as HTMLInputElement;
+    const demoBinarySizeUnit = document.getElementById('demoBinarySizeUnit') as HTMLSelectElement;
+    const demoBinaryEstimate = document.getElementById('demoBinaryEstimate') as HTMLDivElement;
     const loadBinaryBtn = document.getElementById('loadBinaryBtn') as HTMLButtonElement;
     const loadBinaryInput = document.getElementById('loadBinaryInput') as HTMLInputElement;
     const binaryBrowserPanel = document.getElementById('binaryBrowserPanel') as HTMLDivElement;
@@ -1281,6 +1347,62 @@ function setupButtonHandlers(): void {
         startBtn.disabled = false;
         startBtn.textContent = 'START STREAM';
         startBtn.style.background = '#00ff00';
+    };
+
+    const getDemoBinaryTargetBytes = (): number | null => {
+        const sizeValue = Number.parseFloat(demoBinarySizeInput.value);
+        if (!Number.isFinite(sizeValue) || sizeValue <= 0) {
+            return null;
+        }
+
+        const unit = demoBinarySizeUnit.value.toLowerCase();
+        const multiplier = unit === 'gb'
+            ? 1024 ** 3
+            : unit === 'mb'
+                ? 1024 ** 2
+                : 1;
+
+        const bytes = Math.floor(sizeValue * multiplier);
+        return bytes >= 24 ? bytes : null;
+    };
+
+    const getNormalizedSampleRateForDemoBinary = (): number | null => {
+        const sampleRate = Number.parseInt(sampleRateInput.value, 10);
+        if (!Number.isFinite(sampleRate) || sampleRate < 1) {
+            return null;
+        }
+
+        return Math.max(1, Math.floor(sampleRate));
+    };
+
+    const refreshDemoBinaryGeneratorControls = (): void => {
+        const targetBytes = getDemoBinaryTargetBytes();
+        const sampleRate = getNormalizedSampleRateForDemoBinary();
+        const headerBytes = 20;
+
+        if (!targetBytes) {
+            generateDemoBinaryBtn.disabled = true;
+            generateDemoBinaryBtn.style.opacity = '0.6';
+            demoBinaryEstimate.textContent = 'Enter a target size >= 24 bytes.';
+            return;
+        }
+
+        if (!sampleRate) {
+            generateDemoBinaryBtn.disabled = true;
+            generateDemoBinaryBtn.style.opacity = '0.6';
+            demoBinaryEstimate.textContent = 'Enter a valid sample rate (> 0 Hz) first.';
+            return;
+        }
+
+        const sampleCount = Math.max(0, Math.floor((targetBytes - headerBytes) / 4));
+        const actualBytes = headerBytes + sampleCount * 4;
+        const durationSeconds = sampleCount / sampleRate;
+
+        generateDemoBinaryBtn.disabled = sampleCount < 1;
+        generateDemoBinaryBtn.style.opacity = generateDemoBinaryBtn.disabled ? '0.6' : '1';
+        demoBinaryEstimate.textContent =
+            `Actual: ${formatBinarySize(actualBytes)} | Samples: ${sampleCount.toLocaleString()} | ` +
+            `Duration: ${formatDemoGenerationDuration(durationSeconds)} @ ${sampleRate.toLocaleString()} Hz`;
     };
 
     const readAnalysisToolboxPreferencesFromUi = (): void => {
@@ -1368,12 +1490,12 @@ function setupButtonHandlers(): void {
         binaryBrowserInfo.innerHTML = `
             <div style="margin-bottom: 4px;">Shared X-axis: ${sampleRate.toLocaleString()} Hz | Window up to ${formatBinaryDuration(maxDuration)}</div>
             ${importedBinaryEntries.map((entry, index) => {
-                const sampleCount = entry.decoded.values.length;
-                const duration = entry.decoded.sampleRate > 0 ? sampleCount / entry.decoded.sampleRate : 0;
-                const sizeKb = entry.fileSizeBytes / 1024;
-                const safeFileName = escapeHtml(entry.fileName);
-                const rowOpacity = entry.visible ? 1 : 0.55;
-                return `<div style="display:flex; align-items:center; gap:6px; margin-top:4px; opacity:${rowOpacity};">
+            const sampleCount = entry.decoded.values.length;
+            const duration = entry.decoded.sampleRate > 0 ? sampleCount / entry.decoded.sampleRate : 0;
+            const sizeKb = entry.fileSizeBytes / 1024;
+            const safeFileName = escapeHtml(entry.fileName);
+            const rowOpacity = entry.visible ? 1 : 0.55;
+            return `<div style="display:flex; align-items:center; gap:6px; margin-top:4px; opacity:${rowOpacity};">
                     <input type="checkbox" data-curve-index="${index}" data-curve-action="visible" ${entry.visible ? 'checked' : ''}
                            title="Show/hide curve" style="margin:0; accent-color:${entry.color}; cursor:pointer;" />
                     <input type="color" data-curve-index="${index}" data-curve-action="color" value="${entry.color}"
@@ -1382,7 +1504,7 @@ function setupButtonHandlers(): void {
                     <span title="${safeFileName}" style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${index + 1}. ${safeFileName}</span>
                     <span style="color:#9fb7d1;">${formatBinaryDuration(duration)} | ${sizeKb.toFixed(1)} KB</span>
                 </div>`;
-            }).join('')}
+        }).join('')}
         `;
     };
 
@@ -1665,6 +1787,224 @@ function setupButtonHandlers(): void {
         updateStatus('Viewport reset');
     });
 
+    demoBinarySizeInput.addEventListener('input', () => {
+        refreshDemoBinaryGeneratorControls();
+    });
+
+    demoBinarySizeUnit.addEventListener('change', () => {
+        refreshDemoBinaryGeneratorControls();
+    });
+
+    sampleRateInput.addEventListener('input', () => {
+        refreshDemoBinaryGeneratorControls();
+    });
+
+    generateDemoBinaryBtn.addEventListener('click', () => {
+        const targetBytes = getDemoBinaryTargetBytes();
+        const sampleRate = getNormalizedSampleRateForDemoBinary();
+
+        if (!targetBytes) {
+            updateStatus('Demo binary size invalid. Please enter a positive size.');
+            refreshDemoBinaryGeneratorControls();
+            return;
+        }
+
+        if (!sampleRate) {
+            updateStatus('Sample rate invalid. Please enter a value > 0 Hz.');
+            refreshDemoBinaryGeneratorControls();
+            return;
+        }
+
+        const sampleCount = Math.max(0, Math.floor((targetBytes - 20) / 4));
+        if (sampleCount < 1) {
+            updateStatus('Target size is too small for a valid .erosb file.');
+            refreshDemoBinaryGeneratorControls();
+            return;
+        }
+
+        const actualBytes = 20 + sampleCount * 4;
+        const durationSeconds = sampleCount / sampleRate;
+        const sizeValue = Number.parseFloat(demoBinarySizeInput.value);
+        const unit = (demoBinarySizeUnit.value || 'gb').toLowerCase();
+
+        const params = new URLSearchParams({
+            size: Number.isFinite(sizeValue) ? String(sizeValue) : '2',
+            unit,
+            sampleRateHz: String(sampleRate),
+        });
+
+        const downloadUrl = `/api/generate-demo-binary?${params.toString()}`;
+        const link = document.createElement('a');
+        link.href = downloadUrl;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+
+        updateStatus(
+            `Generating demo binary download (${formatBinarySize(actualBytes)}, ${formatDemoGenerationDuration(durationSeconds)} @ ${sampleRate.toLocaleString()} Hz)...`
+        );
+    });
+
+    loadBinaryBtnServer.addEventListener('click', async () => {
+        try {
+            updateStatus('Downloading binary from server...');
+
+            const response = await fetch('/api/download');
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const contentLength = Number(response.headers.get('content-length') ?? '0');
+            const fileName = response.headers.get('x-file-name') ?? 'server-download.erosb';
+
+            let fileBuffer: ArrayBuffer;
+            if (response.body) {
+                const reader = response.body.getReader();
+                const chunks: Uint8Array[] = [];
+                let totalBytes = 0;
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    if (!value || value.byteLength === 0) continue;
+
+                    // Copy chunk so the backing buffer/offset of the stream chunk cannot surprise us later.
+                    chunks.push(value.slice());
+                    totalBytes += value.byteLength;
+                }
+
+                if (totalBytes === 0) {
+                    updateStatus('No binary data received from server.');
+                    return;
+                }
+
+                const merged = new Uint8Array(totalBytes);
+                let offset = 0;
+                for (const chunk of chunks) {
+                    merged.set(chunk, offset);
+                    offset += chunk.byteLength;
+                }
+                fileBuffer = merged.buffer;
+            } else {
+                fileBuffer = await response.arrayBuffer();
+                if (fileBuffer.byteLength === 0) {
+                    updateStatus('No binary data received from server.');
+                    return;
+                }
+            }
+
+            if (contentLength > 0 && contentLength !== fileBuffer.byteLength) {
+                console.warn(
+                    `Downloaded byte count (${fileBuffer.byteLength}) does not match Content-Length (${contentLength}).`
+                );
+            }
+
+            const loadedEntries: ImportedBinaryEntry[] = [];
+            const failedFiles: string[] = [];
+
+            try {
+                const decoded = ErosChart.decodeBinary(fileBuffer);
+                loadedEntries.push({
+                    fileName,
+                    decoded,
+                    fileSizeBytes: contentLength > 0 ? contentLength : fileBuffer.byteLength,
+                    color: '#00d1ff',
+                    visible: true,
+                });
+            } catch (error: unknown) {
+                const message = error instanceof Error ? error.message : String(error);
+                failedFiles.push(`${fileName} (${message})`);
+            }
+
+            if (loadedEntries.length === 0) {
+                throw new Error(failedFiles[0] ?? 'No valid .erosb files selected.');
+            }
+
+            const referenceSampleRate = loadedEntries[0].decoded.sampleRate;
+            const compatibleEntries: ImportedBinaryEntry[] = [];
+
+            for (const entry of loadedEntries) {
+                if (entry.decoded.sampleRate !== referenceSampleRate) {
+                    failedFiles.push(
+                        `${entry.fileName} (sample rate ${entry.decoded.sampleRate} Hz does not match ${referenceSampleRate} Hz)`
+                    );
+                    continue;
+                }
+                compatibleEntries.push(entry);
+            }
+
+            if (compatibleEntries.length === 0) {
+                throw new Error('No compatible binary files share the same sample rate.');
+            }
+
+            if (compatibleEntries.length === 1) {
+                const singleEntry: ImportedBinaryEntry = {
+                    ...compatibleEntries[0],
+                    color: getBinaryCurveColor(0),
+                    visible: true,
+                };
+
+                importedBinaryEntries = [];
+                setViewMode('live');
+                await createOrReplaceSingleBinaryAnalysisChart(singleEntry);
+
+                sampleRateInput.value = String(referenceSampleRate);
+                const singleDuration = referenceSampleRate > 0
+                    ? singleEntry.decoded.values.length / referenceSampleRate
+                    : 0;
+                if (Number.isFinite(singleDuration) && singleDuration > 0) {
+                    durationInput.value = Math.max(1, Math.round(singleDuration)).toString();
+                }
+
+                isStreaming = false;
+                resetStartButtonState();
+                refreshDisplayModeControls();
+
+                updateStatus(
+                    `Binary loaded into analysis view (${singleEntry.decoded.values.length.toLocaleString()} samples, ${formatBinaryDuration(singleDuration)})`
+                );
+
+                if (failedFiles.length > 0) {
+                    console.warn('Skipped binary files:', failedFiles);
+                }
+                return;
+            }
+
+            importedBinaryEntries = compatibleEntries.map((entry, index) => ({
+                ...entry,
+                color: getBinaryCurveColor(index),
+                visible: true,
+            }));
+            setViewMode('binary');
+
+            await createOrReplaceBinaryCompareCharts(importedBinaryEntries);
+            sampleRateInput.value = String(referenceSampleRate);
+            isStreaming = false;
+            resetStartButtonState();
+            renderBinaryBrowser();
+
+            const totalSamples = importedBinaryEntries.reduce((sum, entry) => sum + entry.decoded.values.length, 0);
+            const maxSamples = importedBinaryEntries.reduce((max, entry) => Math.max(max, entry.decoded.values.length), 0);
+            const maxDuration = referenceSampleRate > 0 ? maxSamples / referenceSampleRate : 0;
+
+            updateStatus(
+                `Binary compare: ${importedBinaryEntries.length} curve(s) overlaid (${formatBinaryDuration(maxDuration)} max window, ${totalSamples.toLocaleString()} total samples)`
+            );
+
+            if (failedFiles.length > 0) {
+                console.warn('Skipped binary files:', failedFiles);
+            }
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            updateStatus(`Load failed: ${message}`);
+        }
+    });
+
+
+
+
     downloadBinaryBtn.addEventListener('click', () => {
         if (!chart) {
             updateStatus('Nothing to export. Start a stream or load a file first.');
@@ -1714,10 +2054,10 @@ function setupButtonHandlers(): void {
             for (const file of files) {
                 try {
                     const fileBuffer = await file.arrayBuffer();
-                    const decoded = ErosChart.decodeBinary(fileBuffer);
+                    const decodedResult = ErosChart.decodeBinary(fileBuffer);
                     loadedEntries.push({
                         fileName: file.name,
-                        decoded,
+                        decoded: decodedResult,
                         fileSizeBytes: file.size,
                         color: '#00d1ff',
                         visible: true,
@@ -1815,6 +2155,7 @@ function setupButtonHandlers(): void {
     });
 
     renderBinaryBrowser();
+    refreshDemoBinaryGeneratorControls();
     refreshDisplayModeControls();
 }
 

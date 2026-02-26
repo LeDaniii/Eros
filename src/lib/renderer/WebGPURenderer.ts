@@ -50,9 +50,10 @@ export class WebGPURenderer {
     private pipeline: GPURenderPipeline | null = null; // Shader-Pipeline (Vertex + Fragment Shader)
 
     // === GPU Memory Buffers ===
-    private dataBuffer: GPUBuffer | null = null;           // Voller Ring-Buffer für Exact Mode
+    private dataBuffer: GPUBuffer | null = null;           // Exact-Mode Upload-Buffer (sichtbarer Ausschnitt)
     private downsampledBuffer: GPUBuffer | null = null;    // Kleiner Buffer für Downsampled Mode
     private uniformBuffer: GPUBuffer | null = null;        // Viewport-Infos (Zoom, Min/Max, Mode)
+    private dataBufferSizeBytes = 0;
 
     // === Rendering Resources ===
     private bindGroup: GPUBindGroup | null = null;              // Exact Mode: voller Buffer
@@ -139,12 +140,78 @@ export class WebGPURenderer {
         return this.lastDownsampleResult;
     }
 
+    // WebGPU-Storage-Buffers müssen 4-Byte-ausgerichtet sein.
+    private alignToFourBytes(value: number): number {
+        const rounded = Math.max(0, Math.ceil(value));
+        return rounded % 4 === 0 ? rounded : rounded + (4 - (rounded % 4));
+    }
+
+    // Hardware-Limit für Storage-Bindings; schützt vor ungültigen Exact-Buffern auf großen Kurven.
+    private getMaxStorageBindingSizeBytes(): number {
+        if (!this.device) {
+            return 256;
+        }
+
+        return Math.max(256, Math.floor(this.device.limits.maxStorageBufferBindingSize));
+    }
+
+    private getDefaultExactBufferSizeBytes(): number {
+        const plotWidth = getPlotRect(this.canvas.width, this.canvas.height).width;
+        // Initiale Exact-Kapazität orientiert sich am sichtbaren Plot, nicht an der Gesamtkurve.
+        const targetSamples = Math.max(1, Math.ceil(plotWidth * 8));
+        const targetBytes = this.alignToFourBytes(targetSamples * 4);
+        return Math.min(Math.max(256, targetBytes), this.getMaxStorageBindingSizeBytes());
+    }
+
+    private recreateExactBindGroup(): void {
+        if (!this.device || !this.pipeline || !this.uniformBuffer || !this.dataBuffer) {
+            this.bindGroup = null;
+            return;
+        }
+
+        this.bindGroup = this.device.createBindGroup({
+            layout: this.pipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this.dataBuffer } },
+                { binding: 1, resource: { buffer: this.uniformBuffer } }
+            ]
+        });
+    }
+
+    private ensureExactDataBufferCapacity(requiredSamples: number): boolean {
+        if (!this.device || !this.pipeline || !this.uniformBuffer) {
+            return false;
+        }
+
+        const maxBytes = this.getMaxStorageBindingSizeBytes();
+        const requiredBytes = this.alignToFourBytes(Math.max(1, requiredSamples) * 4);
+        // Wenn der sichtbare Exact-Slice das Device-Limit sprengt, darf der Renderer nicht in Exact wechseln.
+        if (requiredBytes > maxBytes) {
+            return false;
+        }
+
+        const targetBytes = Math.max(this.getDefaultExactBufferSizeBytes(), requiredBytes);
+        if (!this.dataBuffer || this.dataBufferSizeBytes < targetBytes) {
+            this.dataBuffer?.destroy();
+            this.dataBuffer = this.device.createBuffer({
+                size: targetBytes,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+            this.dataBufferSizeBytes = targetBytes;
+            this.recreateExactBindGroup();
+        }
+
+        return this.bindGroup !== null && this.dataBuffer !== null;
+    }
+
     private createGPUResources() {
         if (!this.device || !this.ringBuffer) return;
 
-        // Voller Buffer für Exact Mode
+        // Exact-Mode arbeitet mit einem kleinen sichtbaren Upload-Buffer (vermeidet riesige Storage-Bindings).
+        this.dataBuffer?.destroy();
+        this.dataBufferSizeBytes = this.getDefaultExactBufferSizeBytes();
         this.dataBuffer = this.device.createBuffer({
-            size: this.ringBuffer.data.byteLength,
+            size: this.dataBufferSizeBytes,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
 
@@ -164,14 +231,8 @@ export class WebGPURenderer {
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
 
-        // Bind Group für Exact Mode (voller dataBuffer)
-        this.bindGroup = this.device.createBindGroup({
-            layout: this.pipeline!.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: this.dataBuffer } },
-                { binding: 1, resource: { buffer: this.uniformBuffer } }
-            ]
-        });
+        // Bind Group für Exact Mode (sichtbarer Ausschnitt im dataBuffer)
+        this.recreateExactBindGroup();
 
         // Bind Group für Downsampled Mode (kleiner Buffer)
         this.downsampledBindGroup = this.device.createBindGroup({
@@ -359,14 +420,25 @@ export class WebGPURenderer {
     private updateViewport() {
         if (!this.ringBuffer) return;
 
-        const currentHead = this.ringBuffer.currentHead;
+        // Clamp auf tatsächlich verfügbare Samples (Head kann bei Race/Interaktion sonst kurzfristig ungültig sein).
+        const currentHead = Math.max(0, Math.min(this.ringBuffer.currentHead, this.ringBuffer.data.length));
+        const maxStart = Math.max(0, currentHead - 1);
 
         if (this.viewportOverride) {
-            this.viewport.startIndex = Math.max(0, this.viewportOverride.start);
-            this.viewport.endIndex = Math.min(currentHead, this.viewportOverride.end);
+            const requestedStart = Math.floor(this.viewportOverride.start);
+            const requestedEnd = Math.floor(this.viewportOverride.end);
+            const clampedStart = Math.max(0, Math.min(maxStart, requestedStart));
+            const clampedEnd = Math.max(clampedStart + 1, Math.min(currentHead, requestedEnd));
+            this.viewport.startIndex = clampedStart;
+            this.viewport.endIndex = clampedEnd;
         } else {
             this.viewport.startIndex = 0;
             this.viewport.endIndex = Math.max(currentHead, 1);
+        }
+
+        // Harte Invariante: endIndex muss immer > startIndex sein, sonst zeichnet Exact 0 Vertices.
+        if (this.viewport.endIndex <= this.viewport.startIndex) {
+            this.viewport.endIndex = Math.min(currentHead, this.viewport.startIndex + 1);
         }
     }
 
@@ -380,8 +452,8 @@ export class WebGPURenderer {
      * 4. Shader rendert mit passendem Modus
      */
     public render() {
-        if (!this.device || !this.ringBuffer || !this.dataBuffer ||
-            !this.uniformBuffer || !this.pipeline || !this.bindGroup ||
+        if (!this.device || !this.ringBuffer ||
+            !this.uniformBuffer || !this.pipeline ||
             !this.context || !this.msaaTexture || !this.downsampler ||
             !this.downsampledBuffer || !this.downsampledBindGroup) return;
 
@@ -410,11 +482,22 @@ export class WebGPURenderer {
             this.viewport.minValue = result.globalMin - padding;
             this.viewport.maxValue = result.globalMax + padding;
         }
+        if (!Number.isFinite(this.viewport.minValue) || !Number.isFinite(this.viewport.maxValue)) {
+            this.viewport.minValue = -2.5;
+            this.viewport.maxValue = 2.5;
+        } else if (this.viewport.maxValue <= this.viewport.minValue) {
+            const center = this.viewport.minValue;
+            this.viewport.minValue = center - 0.5;
+            this.viewport.maxValue = center + 0.5;
+        }
 
         // === BUFFER + BIND GROUP WÄHLEN ===
         let activeBindGroup: GPUBindGroup;
         let drawCount: number;
         let mode: number;
+        // Uniform-Indices können in Exact auf den lokalen Slice [0..N) umgebogen werden.
+        let uniformStartIndex = this.viewport.startIndex;
+        let uniformEndIndex = this.viewport.endIndex;
 
         if (result.isDownsampled) {
             // DOWNSAMPLED: Nur kleinen Buffer uploaden (~16KB statt 2.8MB)
@@ -428,16 +511,37 @@ export class WebGPURenderer {
             drawCount = result.vertexCount;
             mode = 1.0;
         } else {
-            // EXACT: Ring-Buffer uploaden (nur bis currentHead, nicht ganzen Buffer)
-            this.device.queue.writeBuffer(
-                this.dataBuffer, 0,
-                this.ringBuffer.data.buffer,
-                this.ringBuffer.data.byteOffset,
-                currentHead * 4
-            );
-            activeBindGroup = this.bindGroup;
-            drawCount = Math.floor(this.viewport.endIndex - this.viewport.startIndex);
-            mode = 0.0;
+            const exactStart = Math.max(0, Math.min(currentHead - 1, Math.floor(this.viewport.startIndex)));
+            const exactEnd = Math.max(exactStart + 1, Math.min(currentHead, Math.floor(this.viewport.endIndex)));
+            const exactVisibleCount = Math.max(1, exactEnd - exactStart);
+
+            if (this.ensureExactDataBufferCapacity(exactVisibleCount)) {
+                // EXACT: Nur sichtbaren Bereich als kompakter Slice (ab Index 0) uploaden.
+                this.device.queue.writeBuffer(
+                    this.dataBuffer!,
+                    0,
+                    this.ringBuffer.data.buffer,
+                    this.ringBuffer.data.byteOffset + exactStart * 4,
+                    exactVisibleCount * 4
+                );
+                activeBindGroup = this.bindGroup!;
+                drawCount = exactVisibleCount;
+                mode = 0.0;
+                // Shader liest Exact-Daten jetzt aus lokalem Slice, nicht mehr aus globalem Ring-Indexraum.
+                uniformStartIndex = 0;
+                uniformEndIndex = exactVisibleCount;
+            } else {
+                // Fallback: wenn Exact-Buffer-Limits erreicht werden, bei downsampled bleiben statt "leer".
+                this.device.queue.writeBuffer(
+                    this.downsampledBuffer, 0,
+                    result.data.buffer,
+                    result.data.byteOffset,
+                    result.vertexCount * 4
+                );
+                activeBindGroup = this.downsampledBindGroup;
+                drawCount = result.vertexCount;
+                mode = 1.0;
+            }
         }
 
         // === UNIFORMS ===
@@ -446,8 +550,8 @@ export class WebGPURenderer {
             this.canvas.height,          // resolution.y
             this.viewport.minValue,      // minValue
             this.viewport.maxValue,      // maxValue
-            this.viewport.startIndex,    // startIndex (Exact Mode)
-            this.viewport.endIndex,      // endIndex (Exact Mode)
+            uniformStartIndex,           // startIndex (Exact Mode)
+            uniformEndIndex,             // endIndex (Exact Mode)
             mode,                        // 0.0 = exact, 1.0 = downsampled
             result.vertexCount,          // vertexCount (Downsampled Mode)
             this.lineColor[0],           // lineColor.r

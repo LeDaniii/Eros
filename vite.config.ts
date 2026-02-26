@@ -7,6 +7,13 @@ export default defineConfig({
         basicSsl() // Wir bleiben bei HTTPS, das ist sicherer für SharedArrayBuffer
     ],
     server: {
+        host: true,
+        proxy: {
+            '/api': {
+                target: 'http://localhost:50051',
+                changeOrigin: true
+            }
+        },
         // Jetzt wo die Config im Root liegt, werden diese Header endlich gesendet!
         headers: {
             'Cross-Origin-Opener-Policy': 'same-origin',
