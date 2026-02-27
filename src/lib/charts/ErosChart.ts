@@ -79,6 +79,7 @@ export class ErosChart {
     private isStreaming = false;
     private animationFrameId: number | null = null;
     private viewportChangeListener: ((startIndex: number, endIndex: number) => void) | null = null;
+    private timeOffsetSamples = 0;
 
     // === Viewport (Zoom/Pan) ===
     private viewportStart = 0;
@@ -168,6 +169,7 @@ export class ErosChart {
                     snapIndicatorRadiusPx: this.options.snapIndicatorRadiusPx,
                 }
             );
+            this.crosshairOverlay.setTimeOffsetSamples(this.timeOffsetSamples);
         }
 
         // ========== WEB WORKER ==========
@@ -296,6 +298,15 @@ export class ErosChart {
             return;
         }
         this.renderer?.setYRangeOverride(minValue, maxValue);
+    }
+
+    public setTimeOffsetSamples(offsetSamples: number): void {
+        if (!Number.isFinite(offsetSamples)) {
+            this.timeOffsetSamples = 0;
+        } else {
+            this.timeOffsetSamples = Math.max(0, Math.floor(offsetSamples));
+        }
+        this.crosshairOverlay?.setTimeOffsetSamples(this.timeOffsetSamples);
     }
 
     public clearYRangeOverride(): void {
@@ -614,7 +625,7 @@ export class ErosChart {
                             viewport.maxValue,
                             visibleSamples,
                             this.options.sampleRate,
-                            start
+                            start + this.timeOffsetSamples
                         );
                     } else {
                         this.gridOverlay?.draw(
@@ -622,7 +633,7 @@ export class ErosChart {
                             2.5,
                             visibleSamples,
                             this.options.sampleRate,
-                            start
+                            start + this.timeOffsetSamples
                         );
                     }
                 } else {
@@ -631,7 +642,7 @@ export class ErosChart {
                         2.5,
                         this.options.bufferSize,
                         this.options.sampleRate,
-                        0
+                        this.timeOffsetSamples
                     );
                 }
 

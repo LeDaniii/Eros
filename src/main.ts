@@ -7,6 +7,12 @@ import { createConnectTransport } from '@connectrpc/connect-web';
 import { ErosChart, type ErosBinaryCurve } from './lib/charts/ErosChart';
 import { ErosStripChart } from './lib/charts/ErosStripChart';
 import {
+    decodeBinaryFileForImport,
+    type BinaryImportDecodeResult,
+    VIRTUAL_CORE_SWITCH_THRESHOLD_BYTES,
+} from './lib/core-virtual/BinaryImportDecoder';
+import { VirtualCurveEngine } from './lib/core-virtual/VirtualCurveEngine';
+import {
     createDerivedCurve,
     createNoiseBandCurves,
     type DerivedCurve,
@@ -61,6 +67,34 @@ interface ImportedBinaryEntry {
 }
 
 let importedBinaryEntries: ImportedBinaryEntry[] = [];
+
+type VirtualAnalysisMode = 'preview' | 'exact';
+
+interface VirtualAnalysisSession {
+    engine: VirtualCurveEngine;
+    fileName: string;
+    color: string;
+    originalSampleRate: number;
+    originalSampleCount: number;
+    sampleStride: number;
+    previewValues: Float32Array;
+    previewSampleRate: number;
+    mode: VirtualAnalysisMode;
+    exactWindowStartSample: number;
+    exactWindowSampleCount: number;
+    isLoading: boolean;
+    pendingSync: boolean;
+}
+
+const VIRTUAL_EXACT_ENTRY_ORIGINAL_SAMPLES = 2_000_000;
+const VIRTUAL_EXACT_EXIT_LOCAL_SAMPLES = 3_000_000;
+const VIRTUAL_EXACT_MIN_WINDOW_SAMPLES = 200_000;
+const VIRTUAL_EXACT_MAX_WINDOW_SAMPLES = 4_000_000;
+const VIRTUAL_EXACT_EDGE_MARGIN_RATIO = 0.2;
+const VIRTUAL_PREFETCH_NEIGHBOR_CHUNKS = 1;
+
+let virtualAnalysisSession: VirtualAnalysisSession | null = null;
+let virtualAnalysisSyncFrameId: number | null = null;
 
 const displayModePreferences: {
     mode: DemoDisplayMode;
@@ -427,13 +461,67 @@ function updateDataStats(): void {
         const totalMB = (totalBytes / 1024 / 1024).toFixed(2);
         const bufferMB = (bufferBytes / 1024 / 1024).toFixed(2);
 
-        dataStatsEl.innerHTML = `
+        let html = `
             - Total: ${stats.totalSamples.toLocaleString()} samples (${totalMB} MB)<br>
             - Visible: ${stats.visibleSamples.toLocaleString()} samples (${zoomFactor}x zoom)<br>
             - Rendered: ${stats.renderedVertices.toLocaleString()} vertices (${stats.isDownsampled ? 'DOWNSAMPLED' : 'EXACT'})<br>
             - Buffer: ${stats.totalSamples.toLocaleString()} / ${stats.bufferSize.toLocaleString()} (${bufferUsage}%)<br>
             - Memory: ${totalMB} / ${bufferMB} MB
         `;
+
+        if (virtualAnalysisSession && currentViewMode === 'live' && displayModePreferences.mode === 'analysis' && chart) {
+            const viewport = chart.getViewportRange();
+            const chunkSamples = Math.max(1, virtualAnalysisSession.engine.chunkSamples);
+            const chunkCount = Math.max(1, virtualAnalysisSession.engine.chunkCount);
+
+            let globalStartSample = 0;
+            let globalEndSample = 1;
+
+            if (virtualAnalysisSession.mode === 'preview') {
+                globalStartSample = Math.max(0, Math.floor(viewport.startIndex * virtualAnalysisSession.sampleStride));
+                globalEndSample = Math.min(
+                    virtualAnalysisSession.originalSampleCount,
+                    Math.ceil(viewport.endIndex * virtualAnalysisSession.sampleStride)
+                );
+            } else {
+                globalStartSample = virtualAnalysisSession.exactWindowStartSample + Math.floor(viewport.startIndex);
+                globalEndSample = virtualAnalysisSession.exactWindowStartSample + Math.ceil(viewport.endIndex);
+                globalStartSample = clampInteger(
+                    globalStartSample,
+                    0,
+                    Math.max(0, virtualAnalysisSession.originalSampleCount - 1)
+                );
+                globalEndSample = clampInteger(
+                    globalEndSample,
+                    globalStartSample + 1,
+                    virtualAnalysisSession.originalSampleCount
+                );
+            }
+
+            if (globalEndSample <= globalStartSample) {
+                globalEndSample = Math.min(virtualAnalysisSession.originalSampleCount, globalStartSample + 1);
+            }
+
+            const currentChunkStart = clampInteger(
+                Math.floor(globalStartSample / chunkSamples),
+                0,
+                chunkCount - 1
+            );
+            const currentChunkEnd = clampInteger(
+                Math.floor(Math.max(globalStartSample, globalEndSample - 1) / chunkSamples),
+                currentChunkStart,
+                chunkCount - 1
+            );
+            const currentChunkLabel = currentChunkStart === currentChunkEnd
+                ? `${currentChunkStart + 1}`
+                : `${currentChunkStart + 1}-${currentChunkEnd + 1}`;
+            const cacheInfo = virtualAnalysisSession.engine.getCacheInfo();
+
+            html += `<br>- Virtual: ${virtualAnalysisSession.mode.toUpperCase()} | Source: ${virtualAnalysisSession.originalSampleCount.toLocaleString()} samples (${formatBinarySize(virtualAnalysisSession.originalSampleCount * 4)})`;
+            html += `<br>- Chunks: total ${chunkCount.toLocaleString()} | current ${currentChunkLabel} | cache ${cacheInfo.cachedChunks}/${cacheInfo.maxCachedChunks}`;
+        }
+
+        dataStatsEl.innerHTML = html;
     }
 }
 
@@ -644,6 +732,282 @@ function refreshAnalysisToolboxControls(): void {
         : 'Enabled (no overlay data yet). Press APPLY or wait for samples.';
 }
 
+function clampInteger(value: number, min: number, max: number): number {
+    const normalized = Math.floor(value);
+    return Math.max(min, Math.min(max, normalized));
+}
+
+function isVirtualAnalysisActive(): boolean {
+    return virtualAnalysisSession !== null && currentViewMode === 'live' && displayModePreferences.mode === 'analysis';
+}
+
+function clearVirtualAnalysisSession(): void {
+    if (virtualAnalysisSyncFrameId !== null) {
+        cancelAnimationFrame(virtualAnalysisSyncFrameId);
+        virtualAnalysisSyncFrameId = null;
+    }
+
+    const session = virtualAnalysisSession;
+    virtualAnalysisSession = null;
+    if (session) {
+        void Promise.resolve(session.engine.close()).catch(() => undefined);
+    }
+}
+
+async function withVirtualLoadingGuard(
+    session: VirtualAnalysisSession,
+    action: () => Promise<void>
+): Promise<void> {
+    if (session.isLoading) {
+        session.pendingSync = true;
+        return;
+    }
+
+    session.isLoading = true;
+    try {
+        await action();
+    } finally {
+        session.isLoading = false;
+        if (session.pendingSync) {
+            session.pendingSync = false;
+            if (virtualAnalysisSession === session) {
+                scheduleVirtualAnalysisSync();
+            }
+        }
+    }
+}
+
+function scheduleVirtualAnalysisSync(): void {
+    if (!isVirtualAnalysisActive()) {
+        return;
+    }
+
+    if (virtualAnalysisSyncFrameId !== null) {
+        return;
+    }
+
+    virtualAnalysisSyncFrameId = requestAnimationFrame(() => {
+        virtualAnalysisSyncFrameId = null;
+        void syncVirtualAnalysisSession();
+    });
+}
+
+function onPrimaryChartViewportChanged(): void {
+    scheduleAnalysisToolboxSync();
+    scheduleVirtualAnalysisSync();
+}
+
+async function applyVirtualPreviewWindow(
+    session: VirtualAnalysisSession,
+    focusGlobalStart?: number,
+    focusGlobalEnd?: number
+): Promise<void> {
+    await withVirtualLoadingGuard(session, async () => {
+        const previewSampleRate = Math.max(1, session.previewSampleRate);
+        const previewSampleCount = Math.max(1, session.previewValues.length);
+        const previewBufferSize = Math.max(1024, Math.ceil(previewSampleCount * 1.1));
+        const analysisChart = await createOrReplaceAnalysisChart(previewSampleRate, previewBufferSize);
+        if (virtualAnalysisSession !== session) {
+            return;
+        }
+
+        analysisChart.setTimeOffsetSamples(0);
+        analysisChart.setLineColor(session.color);
+        analysisChart.loadData(session.previewValues);
+
+        if (
+            Number.isFinite(focusGlobalStart)
+            && Number.isFinite(focusGlobalEnd)
+            && focusGlobalEnd! > focusGlobalStart!
+        ) {
+            const mappedStart = Math.floor((focusGlobalStart ?? 0) / session.sampleStride);
+            const mappedEnd = Math.ceil((focusGlobalEnd ?? 0) / session.sampleStride);
+            const clampedStart = clampInteger(mappedStart, 0, Math.max(0, previewSampleCount - 1));
+            const clampedEnd = clampInteger(mappedEnd, clampedStart + 1, previewSampleCount);
+            analysisChart.setViewport(clampedStart, clampedEnd);
+        }
+
+        session.mode = 'preview';
+        session.exactWindowStartSample = 0;
+        session.exactWindowSampleCount = 0;
+        scheduleVirtualAnalysisSync();
+    });
+}
+
+async function applyVirtualExactWindow(
+    session: VirtualAnalysisSession,
+    windowStartSample: number,
+    windowEndSample: number,
+    focusGlobalStart: number,
+    focusGlobalEnd: number
+): Promise<void> {
+    await withVirtualLoadingGuard(session, async () => {
+        const clampedWindowStart = clampInteger(windowStartSample, 0, Math.max(0, session.originalSampleCount - 1));
+        const clampedWindowEnd = clampInteger(windowEndSample, clampedWindowStart + 1, session.originalSampleCount);
+        const values = await session.engine.getExactRange({
+            startSample: clampedWindowStart,
+            endSample: clampedWindowEnd,
+            prefetchNeighborChunks: VIRTUAL_PREFETCH_NEIGHBOR_CHUNKS,
+        });
+        if (virtualAnalysisSession !== session) {
+            return;
+        }
+
+        if (values.length < 2) {
+            return;
+        }
+
+        const exactBufferSize = Math.max(1024, Math.ceil(values.length * 1.1));
+        const analysisChart = await createOrReplaceAnalysisChart(session.originalSampleRate, exactBufferSize);
+        if (virtualAnalysisSession !== session) {
+            return;
+        }
+
+        analysisChart.setTimeOffsetSamples(clampedWindowStart);
+        analysisChart.setLineColor(session.color);
+        analysisChart.loadData(values);
+
+        const localFocusStart = clampInteger(focusGlobalStart - clampedWindowStart, 0, values.length - 1);
+        const localFocusEnd = clampInteger(focusGlobalEnd - clampedWindowStart, localFocusStart + 1, values.length);
+        analysisChart.setViewport(localFocusStart, localFocusEnd);
+
+        session.mode = 'exact';
+        session.exactWindowStartSample = clampedWindowStart;
+        session.exactWindowSampleCount = values.length;
+        scheduleVirtualAnalysisSync();
+    });
+}
+
+function computeVirtualExactWindowAroundFocus(
+    session: VirtualAnalysisSession,
+    focusGlobalStart: number,
+    focusGlobalEnd: number,
+    multiplier: number
+): { windowStart: number; windowEnd: number } {
+    const focusStart = clampInteger(focusGlobalStart, 0, Math.max(0, session.originalSampleCount - 1));
+    const focusEnd = clampInteger(focusGlobalEnd, focusStart + 1, session.originalSampleCount);
+    const focusVisible = Math.max(1, focusEnd - focusStart);
+    const targetWindow = clampInteger(
+        Math.max(VIRTUAL_EXACT_MIN_WINDOW_SAMPLES, focusVisible * multiplier),
+        VIRTUAL_EXACT_MIN_WINDOW_SAMPLES,
+        VIRTUAL_EXACT_MAX_WINDOW_SAMPLES
+    );
+
+    const focusCenter = Math.floor((focusStart + focusEnd) / 2);
+    let windowStart = Math.max(0, focusCenter - Math.floor(targetWindow / 2));
+    let windowEnd = Math.min(session.originalSampleCount, windowStart + targetWindow);
+    windowStart = Math.max(0, windowEnd - targetWindow);
+
+    return { windowStart, windowEnd };
+}
+
+async function syncVirtualAnalysisSession(): Promise<void> {
+    const session = virtualAnalysisSession;
+    if (!session || !isAnalysisChartInstance(chart) || currentViewMode !== 'live' || displayModePreferences.mode !== 'analysis') {
+        return;
+    }
+
+    if (session.isLoading) {
+        session.pendingSync = true;
+        return;
+    }
+
+    const { startIndex, endIndex } = chart.getViewportRange();
+    const visibleSamples = Math.max(1, Math.ceil(endIndex - startIndex));
+
+    if (session.mode === 'preview') {
+        const visibleOriginalSamples = visibleSamples * session.sampleStride;
+        if (visibleOriginalSamples > VIRTUAL_EXACT_ENTRY_ORIGINAL_SAMPLES) {
+            return;
+        }
+
+        const focusGlobalStart = Math.max(0, Math.floor(startIndex * session.sampleStride));
+        const focusGlobalEnd = Math.min(session.originalSampleCount, Math.ceil(endIndex * session.sampleStride));
+        if (focusGlobalEnd <= focusGlobalStart) {
+            return;
+        }
+
+        const nextWindow = computeVirtualExactWindowAroundFocus(session, focusGlobalStart, focusGlobalEnd, 2);
+        await applyVirtualExactWindow(
+            session,
+            nextWindow.windowStart,
+            nextWindow.windowEnd,
+            focusGlobalStart,
+            focusGlobalEnd
+        );
+        updateStatus(
+            `Virtual exact window loaded (${formatBinaryDuration((focusGlobalEnd - focusGlobalStart) / session.originalSampleRate)} visible).`
+        );
+        return;
+    }
+
+    const localStart = clampInteger(startIndex, 0, Math.max(0, session.exactWindowSampleCount - 1));
+    const localEnd = clampInteger(endIndex, localStart + 1, session.exactWindowSampleCount);
+    const focusGlobalStart = session.exactWindowStartSample + localStart;
+    const focusGlobalEnd = session.exactWindowStartSample + localEnd;
+    const exactVisible = Math.max(1, localEnd - localStart);
+
+    if (exactVisible >= VIRTUAL_EXACT_EXIT_LOCAL_SAMPLES) {
+        await applyVirtualPreviewWindow(session, focusGlobalStart, focusGlobalEnd);
+        updateStatus('Virtual preview restored for wider window navigation.');
+        return;
+    }
+
+    const edgeMargin = Math.max(128, Math.floor(session.exactWindowSampleCount * VIRTUAL_EXACT_EDGE_MARGIN_RATIO));
+    const nearLeftEdge = localStart <= edgeMargin;
+    const nearRightEdge = localEnd >= Math.max(1, session.exactWindowSampleCount - edgeMargin);
+    if (!nearLeftEdge && !nearRightEdge) {
+        return;
+    }
+
+    const nextWindow = computeVirtualExactWindowAroundFocus(session, focusGlobalStart, focusGlobalEnd, 3);
+    const shiftDelta = Math.abs(nextWindow.windowStart - session.exactWindowStartSample);
+    const minimumShift = Math.max(2048, Math.floor((nextWindow.windowEnd - nextWindow.windowStart) * 0.1));
+    if (shiftDelta < minimumShift) {
+        return;
+    }
+
+    await applyVirtualExactWindow(
+        session,
+        nextWindow.windowStart,
+        nextWindow.windowEnd,
+        focusGlobalStart,
+        focusGlobalEnd
+    );
+}
+
+async function activateVirtualAnalysisSession(
+    entry: ImportedBinaryEntry,
+    sourceFile: File,
+    decodedResult: BinaryImportDecodeResult
+): Promise<void> {
+    clearVirtualAnalysisSession();
+
+    const engine = await VirtualCurveEngine.openFromLocalFile(sourceFile, {
+        maxCachedChunks: 64,
+        autoPrefetchNeighborChunks: VIRTUAL_PREFETCH_NEIGHBOR_CHUNKS,
+    });
+
+    const session: VirtualAnalysisSession = {
+        engine,
+        fileName: entry.fileName,
+        color: entry.color,
+        originalSampleRate: Math.max(1, decodedResult.originalSampleRate),
+        originalSampleCount: Math.max(1, decodedResult.originalSampleCount),
+        sampleStride: Math.max(1, decodedResult.sampleStride),
+        previewValues: decodedResult.decoded.values,
+        previewSampleRate: Math.max(1, decodedResult.decoded.sampleRate),
+        mode: 'preview',
+        exactWindowStartSample: 0,
+        exactWindowSampleCount: 0,
+        isLoading: false,
+        pendingSync: false,
+    };
+
+    virtualAnalysisSession = session;
+    await applyVirtualPreviewWindow(session);
+}
+
 async function createOrReplaceAnalysisChart(sampleRate: number, bufferSize: number): Promise<ErosChart> {
     destroyBinaryOverlayCharts();
     destroyAnalysisToolboxOverlayCharts(false);
@@ -666,9 +1030,7 @@ async function createOrReplaceAnalysisChart(sampleRate: number, bufferSize: numb
     });
 
     await nextChart.initialize();
-    nextChart.setViewportChangeListener(() => {
-        scheduleAnalysisToolboxSync();
-    });
+    nextChart.setViewportChangeListener(onPrimaryChartViewportChanged);
     chart = nextChart;
     refreshDisplayModeControls();
     void refreshAnalysisToolboxOverlays(true);
@@ -676,6 +1038,7 @@ async function createOrReplaceAnalysisChart(sampleRate: number, bufferSize: numb
 }
 
 async function createOrReplaceStripChart(_sampleRate: number, _bufferSize: number): Promise<ErosStripChart> {
+    clearVirtualAnalysisSession();
     destroyBinaryOverlayCharts();
     destroyAnalysisToolboxOverlayCharts(false);
 
@@ -1227,6 +1590,7 @@ function scheduleBinaryCompareSync(): void {
 }
 
 async function createOrReplaceBinaryCompareCharts(entries: ImportedBinaryEntry[]): Promise<void> {
+    clearVirtualAnalysisSession();
     destroyBinaryOverlayCharts();
     destroyAnalysisToolboxOverlayCharts(false);
 
@@ -1287,6 +1651,7 @@ async function createOrReplaceBinaryCompareCharts(entries: ImportedBinaryEntry[]
 }
 
 async function createOrReplaceSingleBinaryAnalysisChart(entry: ImportedBinaryEntry): Promise<void> {
+    clearVirtualAnalysisSession();
     displayModePreferences.mode = 'analysis';
 
     const sampleRate = Math.max(1, entry.decoded.sampleRate);
@@ -1294,6 +1659,7 @@ async function createOrReplaceSingleBinaryAnalysisChart(entry: ImportedBinaryEnt
     const bufferSize = Math.max(1024, Math.ceil(sampleCount * 1.1));
 
     const analysisChart = await createOrReplaceAnalysisChart(sampleRate, bufferSize);
+    analysisChart.setTimeOffsetSamples(0);
     analysisChart.setLineColor(entry.color);
     analysisChart.loadData(entry.decoded.values);
 
@@ -1511,7 +1877,10 @@ function setupButtonHandlers(): void {
     const setViewMode = (mode: 'idle' | 'live' | 'binary'): void => {
         currentViewMode = mode;
         if (mode === 'binary') {
+            clearVirtualAnalysisSession();
             destroyAnalysisToolboxOverlayCharts(false);
+        } else if (mode !== 'live') {
+            clearVirtualAnalysisSession();
         }
         renderBinaryBrowser();
         refreshAnalysisToolboxControls();
@@ -1743,6 +2112,7 @@ function setupButtonHandlers(): void {
         const sampleRate = parseInt(sampleRateInput.value, 10);
 
         try {
+            clearVirtualAnalysisSession();
             if (displayModePreferences.mode === 'live-strip') {
                 updateStatus('Opening strip chart (Boolean-RPC)...');
                 const activeChart = await createOrReplaceStripChart(sampleRate, Math.ceil(duration * sampleRate * 1.1));
@@ -1783,6 +2153,12 @@ function setupButtonHandlers(): void {
     });
 
     resetZoomBtn.addEventListener('click', () => {
+        if (virtualAnalysisSession) {
+            void applyVirtualPreviewWindow(virtualAnalysisSession);
+            updateStatus('Virtual viewport reset (preview mode).');
+            return;
+        }
+
         chart?.resetViewport();
         updateStatus('Viewport reset');
     });
@@ -2050,18 +2426,33 @@ function setupButtonHandlers(): void {
 
             const loadedEntries: ImportedBinaryEntry[] = [];
             const failedFiles: string[] = [];
+            const virtualImportNotices: string[] = [];
+            const decodedResultByFileName = new Map<string, { file: File; decodedResult: BinaryImportDecodeResult }>();
 
             for (const file of files) {
                 try {
-                    const fileBuffer = await file.arrayBuffer();
-                    const decodedResult = ErosChart.decodeBinary(fileBuffer);
+                    const decodedResult = await decodeBinaryFileForImport(file);
+                    decodedResultByFileName.set(file.name, { file, decodedResult });
                     loadedEntries.push({
                         fileName: file.name,
-                        decoded: decodedResult,
+                        decoded: decodedResult.decoded,
                         fileSizeBytes: file.size,
                         color: '#00d1ff',
                         visible: true,
                     });
+
+                    if (decodedResult.coreMode === 'virtual') {
+                        const effectiveSampleRate = decodedResult.decoded.sampleRate;
+                        const originalDurationSeconds = decodedResult.originalSampleCount / decodedResult.originalSampleRate;
+                        const effectiveDurationSeconds = decodedResult.decoded.values.length / effectiveSampleRate;
+                        virtualImportNotices.push(
+                            `${file.name}: virtual core (${formatBinarySize(file.size)} > ${formatBinarySize(VIRTUAL_CORE_SWITCH_THRESHOLD_BYTES)}), ` +
+                            `downsampled ${decodedResult.sampleStride}x (` +
+                            `${decodedResult.originalSampleCount.toLocaleString()} -> ${decodedResult.decoded.values.length.toLocaleString()} samples, ` +
+                            `${decodedResult.originalSampleRate.toLocaleString()} Hz -> ${effectiveSampleRate.toLocaleString()} Hz, ` +
+                            `${formatDemoGenerationDuration(originalDurationSeconds)} -> ${formatDemoGenerationDuration(effectiveDurationSeconds)})`
+                        );
+                    }
                 } catch (error: unknown) {
                     const message = error instanceof Error ? error.message : String(error);
                     failedFiles.push(`${file.name} (${message})`);
@@ -2098,14 +2489,22 @@ function setupButtonHandlers(): void {
 
                 importedBinaryEntries = [];
                 setViewMode('live');
-                await createOrReplaceSingleBinaryAnalysisChart(singleEntry);
-
-                sampleRateInput.value = String(referenceSampleRate);
-                const singleDuration = referenceSampleRate > 0
+                const virtualSource = decodedResultByFileName.get(singleEntry.fileName);
+                let resolvedSampleRateForUi = referenceSampleRate;
+                let resolvedDurationSeconds = referenceSampleRate > 0
                     ? singleEntry.decoded.values.length / referenceSampleRate
                     : 0;
-                if (Number.isFinite(singleDuration) && singleDuration > 0) {
-                    durationInput.value = Math.max(1, Math.round(singleDuration)).toString();
+                if (virtualSource && virtualSource.decodedResult.coreMode === 'virtual') {
+                    await activateVirtualAnalysisSession(singleEntry, virtualSource.file, virtualSource.decodedResult);
+                    resolvedSampleRateForUi = Math.max(1, virtualSource.decodedResult.originalSampleRate);
+                    resolvedDurationSeconds = virtualSource.decodedResult.originalSampleCount / resolvedSampleRateForUi;
+                } else {
+                    await createOrReplaceSingleBinaryAnalysisChart(singleEntry);
+                }
+
+                sampleRateInput.value = String(resolvedSampleRateForUi);
+                if (Number.isFinite(resolvedDurationSeconds) && resolvedDurationSeconds > 0) {
+                    durationInput.value = Math.max(1, Math.round(resolvedDurationSeconds)).toString();
                 }
 
                 isStreaming = false;
@@ -2113,8 +2512,15 @@ function setupButtonHandlers(): void {
                 refreshDisplayModeControls();
 
                 updateStatus(
-                    `Binary loaded into analysis view (${singleEntry.decoded.values.length.toLocaleString()} samples, ${formatBinaryDuration(singleDuration)})`
+                    `Binary loaded into analysis view (${singleEntry.decoded.values.length.toLocaleString()} samples, ${formatBinaryDuration(resolvedDurationSeconds)})`
                 );
+
+                if (virtualImportNotices.length > 0) {
+                    console.warn('Virtual core import notices:', virtualImportNotices);
+                    updateStatus(
+                        `Binary loaded via virtual core (${virtualImportNotices.length} file, threshold ${formatBinarySize(VIRTUAL_CORE_SWITCH_THRESHOLD_BYTES)}).`
+                    );
+                }
 
                 if (failedFiles.length > 0) {
                     console.warn('Skipped binary files:', failedFiles);
@@ -2142,6 +2548,13 @@ function setupButtonHandlers(): void {
             updateStatus(
                 `Binary compare: ${importedBinaryEntries.length} curve(s) overlaid (${formatBinaryDuration(maxDuration)} max window, ${totalSamples.toLocaleString()} total samples)`
             );
+
+            if (virtualImportNotices.length > 0) {
+                console.warn('Virtual core import notices:', virtualImportNotices);
+                updateStatus(
+                    `Binary compare loaded via virtual core (${virtualImportNotices.length} file(s), threshold ${formatBinarySize(VIRTUAL_CORE_SWITCH_THRESHOLD_BYTES)}).`
+                );
+            }
 
             if (failedFiles.length > 0) {
                 console.warn('Skipped binary files:', failedFiles);

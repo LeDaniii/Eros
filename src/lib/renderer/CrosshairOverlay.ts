@@ -32,6 +32,7 @@ export class CrosshairOverlay {
     private parentCanvas: HTMLCanvasElement;
     private buffer: SharedRingBuffer;
     private sampleRate: number;
+    private timeOffsetSamples = 0;
 
     private mouseX = -1;  // -1 = outside
     private mouseY = -1;
@@ -138,6 +139,15 @@ export class CrosshairOverlay {
         }));
     }
 
+    /** Optional global time offset in samples (used by virtual exact windows). */
+    public setTimeOffsetSamples(offsetSamples: number): void {
+        if (!Number.isFinite(offsetSamples)) {
+            this.timeOffsetSamples = 0;
+            return;
+        }
+        this.timeOffsetSamples = Math.max(0, Math.floor(offsetSamples));
+    }
+
     private onMouseMove(event: MouseEvent): void {
         const rect = this.parentCanvas.getBoundingClientRect();
         this.mouseX = event.clientX - rect.left;
@@ -173,7 +183,7 @@ export class CrosshairOverlay {
         const crosshairY = snap.y;
 
         const timeValue = snap.snapped
-            ? snap.sampleIndex / this.sampleRate
+            ? (snap.sampleIndex + this.timeOffsetSamples) / this.sampleRate
             : this.getTimeAtX(this.mouseX);
 
         const yValue = snap.snapped
@@ -370,7 +380,7 @@ export class CrosshairOverlay {
 
     private getTimeAtX(x: number): number {
         const sampleIndex = this.getSampleIndexAtX(x);
-        return sampleIndex / this.sampleRate;
+        return (sampleIndex + this.timeOffsetSamples) / this.sampleRate;
     }
 
     private getSampleIndexAtX(x: number): number {

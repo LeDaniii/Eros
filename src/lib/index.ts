@@ -47,3 +47,25 @@ export type {
     RollingStdDevDerivedCurveSpec,
     RollingBandDerivedCurveSpec,
 } from './toolbox';
+
+// === Virtual Core (large curves: chunked / out-of-core) ===
+export { LocalFileCurveSource } from './core-virtual/LocalFileCurveSource';
+export { HttpRangeCurveSource } from './core-virtual/HttpRangeCurveSource';
+export type { HttpRangeCurveSourceOptions } from './core-virtual/HttpRangeCurveSource';
+export { VirtualCurveEngine } from './core-virtual/VirtualCurveEngine';
+export type {
+    VirtualCurveEngineOptions,
+    VirtualCurveHeader,
+    VirtualCurveChunk,
+    VirtualCurveExactRangeRequest,
+    VirtualCurvePrefetchRequest,
+} from './core-virtual/VirtualCurveEngine';
+export {
+    decodeBinaryFileForImport,
+    shouldUseVirtualCoreForFile,
+    VIRTUAL_CORE_SWITCH_THRESHOLD_BYTES,
+} from './core-virtual/BinaryImportDecoder';
+export type {
+    BinaryImportCoreMode,
+    BinaryImportDecodeResult,
+} from './core-virtual/BinaryImportDecoder';
