@@ -14,7 +14,11 @@ export type DerivedCurveKind =
     | 'rolling-lower-band'
     | 'envelope-upper'
     | 'envelope-lower'
-    | 'envelope-center';
+    | 'envelope-center'
+    | 'series-spread'
+    | 'series-delta'
+    | 'threshold-above'
+    | 'threshold-below';
 
 export interface DerivedCurve {
     kind: DerivedCurveKind;

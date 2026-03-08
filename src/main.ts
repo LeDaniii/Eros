@@ -38,7 +38,7 @@ interface DemoViewportStrategyState {
     isFrozen: boolean;
 }
 
-type AnalysisToolboxMode = 'ema' | 'moving-average' | 'noise-band' | 'envelope';
+type AnalysisToolboxMode = 'ema' | 'moving-average' | 'noise-band' | 'envelope' | 'spread' | 'delta' | 'threshold-violations';
 
 let chart: DemoChart | null = null;
 let isStreaming = false;
@@ -115,12 +115,16 @@ const analysisToolboxPreferences: {
     mode: AnalysisToolboxMode;
     windowSize: number;
     sigma: number;
+    thresholdLow: number;
+    thresholdHigh: number;
     autoRefresh: boolean;
 } = {
     enabled: false,
     mode: 'ema',
     windowSize: 50,
     sigma: 2,
+    thresholdLow: -1,
+    thresholdHigh: 1,
     autoRefresh: true,
 };
 
@@ -365,6 +369,9 @@ function createControlPanel(): HTMLDivElement {
                     <option value="moving-average">Moving average</option>
                     <option value="noise-band">Mean + noise band</option>
                     <option value="envelope">Envelope (multi-curve)</option>
+                    <option value="spread">Spread (max-min)</option>
+                    <option value="delta">Delta (curve1-curve2)</option>
+                    <option value="threshold-violations">Threshold violations</option>
                 </select>
                 <button id="analysisToolboxApplyBtn"
                         style="padding:4px 8px; background:#5a4314; color:#fff0c2; border:1px solid #d4a53a; cursor:pointer; font-weight:bold; font-size:10px; border-radius:4px;">
@@ -377,6 +384,14 @@ function createControlPanel(): HTMLDivElement {
                        style="min-width:0; padding:4px; background:#2a2110; color:#fff1c6; border:1px solid #8d6e2f; font-family:monospace; font-size:11px;" />
                 <label for="analysisToolboxSigmaInput" style="font-size:10px; color:#d7c38a;">Sigma</label>
                 <input id="analysisToolboxSigmaInput" type="number" min="0.1" step="0.1" value="2"
+                       style="min-width:0; padding:4px; background:#2a2110; color:#fff1c6; border:1px solid #8d6e2f; font-family:monospace; font-size:11px;" />
+            </div>
+            <div style="display:grid; grid-template-columns:auto 1fr auto 1fr; gap:6px; align-items:center; margin-top:6px;">
+                <label for="analysisToolboxThresholdLowInput" style="font-size:10px; color:#d7c38a;">Low</label>
+                <input id="analysisToolboxThresholdLowInput" type="number" step="0.1" value="-1"
+                       style="min-width:0; padding:4px; background:#2a2110; color:#fff1c6; border:1px solid #8d6e2f; font-family:monospace; font-size:11px;" />
+                <label for="analysisToolboxThresholdHighInput" style="font-size:10px; color:#d7c38a;">High</label>
+                <input id="analysisToolboxThresholdHighInput" type="number" step="0.1" value="1"
                        style="min-width:0; padding:4px; background:#2a2110; color:#fff1c6; border:1px solid #8d6e2f; font-family:monospace; font-size:11px;" />
             </div>
             <div id="analysisToolboxLegend" style="margin-top: 6px; border-top: 1px solid rgba(212,165,58,0.25); padding-top: 6px; font-size: 10px; color: #d7c38a;">
@@ -627,19 +642,32 @@ function refreshAnalysisToolboxControls(): void {
     const modeSelect = document.getElementById('analysisToolboxModeSelect') as HTMLSelectElement | null;
     const windowInput = document.getElementById('analysisToolboxWindowInput') as HTMLInputElement | null;
     const sigmaInput = document.getElementById('analysisToolboxSigmaInput') as HTMLInputElement | null;
+    const thresholdLowInput = document.getElementById('analysisToolboxThresholdLowInput') as HTMLInputElement | null;
+    const thresholdHighInput = document.getElementById('analysisToolboxThresholdHighInput') as HTMLInputElement | null;
     const applyBtn = document.getElementById('analysisToolboxApplyBtn') as HTMLButtonElement | null;
     const legend = document.getElementById('analysisToolboxLegend') as HTMLDivElement | null;
     const info = document.getElementById('analysisToolboxInfo') as HTMLDivElement | null;
 
-    if (!panel || !enableInput || !autoRefreshInput || !modeSelect || !windowInput || !sigmaInput || !applyBtn || !legend || !info) {
+    if (!panel || !enableInput || !autoRefreshInput || !modeSelect || !windowInput || !sigmaInput || !thresholdLowInput || !thresholdHighInput || !applyBtn || !legend || !info) {
         return;
     }
 
     const analysisModeSelected = displayModePreferences.mode === 'analysis' || currentViewMode === 'binary';
     const toolboxAvailable = canUseAnalysisToolbox();
-    const sigmaRelevant = analysisToolboxPreferences.mode === 'noise-band';
-    const envelopeSourceCount = currentViewMode === 'binary' ? getVisibleBinaryToolboxEntries().length : 1;
-    const envelopeReady = analysisToolboxPreferences.mode !== 'envelope' || envelopeSourceCount >= 2;
+
+    const mode = analysisToolboxPreferences.mode;
+    const windowRelevant = mode === 'ema' || mode === 'moving-average' || mode === 'noise-band';
+    const sigmaRelevant = mode === 'noise-band';
+    const thresholdRelevant = mode === 'threshold-violations';
+    const multiSourceRequired = mode === 'envelope' || mode === 'spread' || mode === 'delta';
+    const sourceCount = currentViewMode === 'binary' ? getVisibleBinaryToolboxEntries().length : 1;
+    const modeReady = !multiSourceRequired || sourceCount >= 2;
+
+    const modeRequirementLabel = mode === 'spread'
+        ? 'Spread'
+        : mode === 'delta'
+            ? 'Delta'
+            : 'Envelope';
 
     panel.style.display = analysisModeSelected ? 'block' : 'none';
     enableInput.checked = analysisToolboxPreferences.enabled;
@@ -647,14 +675,18 @@ function refreshAnalysisToolboxControls(): void {
     modeSelect.value = analysisToolboxPreferences.mode;
     windowInput.value = String(Math.max(1, Math.floor(analysisToolboxPreferences.windowSize)));
     sigmaInput.value = String(analysisToolboxPreferences.sigma);
+    thresholdLowInput.value = String(analysisToolboxPreferences.thresholdLow);
+    thresholdHighInput.value = String(analysisToolboxPreferences.thresholdHigh);
 
     const controlsEnabled = analysisModeSelected;
     enableInput.disabled = !controlsEnabled;
     autoRefreshInput.disabled = !controlsEnabled || !analysisToolboxPreferences.enabled;
     modeSelect.disabled = !controlsEnabled || !analysisToolboxPreferences.enabled;
-    windowInput.disabled = !controlsEnabled || !analysisToolboxPreferences.enabled;
+    windowInput.disabled = !controlsEnabled || !analysisToolboxPreferences.enabled || !windowRelevant;
     sigmaInput.disabled = !controlsEnabled || !analysisToolboxPreferences.enabled || !sigmaRelevant;
-    applyBtn.disabled = !controlsEnabled || !analysisToolboxPreferences.enabled || !toolboxAvailable || !envelopeReady;
+    thresholdLowInput.disabled = !controlsEnabled || !analysisToolboxPreferences.enabled || !thresholdRelevant;
+    thresholdHighInput.disabled = !controlsEnabled || !analysisToolboxPreferences.enabled || !thresholdRelevant;
+    applyBtn.disabled = !controlsEnabled || !analysisToolboxPreferences.enabled || !toolboxAvailable || !modeReady;
 
     const baseColor = toolboxAvailable ? '#fff1c6' : '#c0ab74';
     applyBtn.style.opacity = applyBtn.disabled ? '0.6' : '1';
@@ -674,8 +706,8 @@ function refreshAnalysisToolboxControls(): void {
             return '<div style="opacity:0.8;">Create/start an analysis chart first</div>';
         }
 
-        if (!envelopeReady) {
-            return '<div style="opacity:0.8;">Envelope needs at least 2 visible curves</div>';
+        if (!modeReady) {
+            return `<div style="opacity:0.8;">${modeRequirementLabel} needs at least 2 visible curves</div>`;
         }
 
         if (analysisToolboxDerivedCurves.length < 1) {
@@ -726,8 +758,8 @@ function refreshAnalysisToolboxControls(): void {
         return;
     }
 
-    if (!envelopeReady) {
-        info.textContent = 'Envelope mode needs at least 2 visible curves';
+    if (!modeReady) {
+        info.textContent = `${modeRequirementLabel} mode needs at least 2 visible curves`;
         return;
     }
 
@@ -1552,6 +1584,14 @@ function getDefaultAnalysisToolboxCurveStyle(curve: DerivedCurve, index: number)
             return { visible: true, color: '#4aa3ff' };
         case 'envelope-center':
             return { visible: true, color: '#ffd166' };
+        case 'series-spread':
+            return { visible: true, color: '#ff99c8' };
+        case 'series-delta':
+            return { visible: true, color: '#8ecae6' };
+        case 'threshold-above':
+            return { visible: true, color: '#ff595e' };
+        case 'threshold-below':
+            return { visible: true, color: '#1982c4' };
         default:
             return { visible: true, color: getAnalysisToolboxCurveColor(index) };
     }
@@ -1599,12 +1639,15 @@ function buildAnalysisToolboxDerivedCurves(
     switch (analysisToolboxPreferences.mode) {
         case 'ema':
             return [createDerivedCurve(values, { kind: 'ema', period: windowSize, label: `EMA(${windowSize})` })];
+
         case 'moving-average':
             return [createDerivedCurve(values, { kind: 'moving-average', windowSize, label: `MA(${windowSize})` })];
+
         case 'noise-band': {
             const band = createNoiseBandCurves(values, { windowSize, sigma });
             return [band.center, band.upper, band.lower];
         }
+
         case 'envelope': {
             const seriesForEnvelope = envelopeSourceSeries.filter((series) => (series.length ?? 0) > 0);
             if (seriesForEnvelope.length < 2) {
@@ -1621,6 +1664,139 @@ function buildAnalysisToolboxDerivedCurves(
             return envelope.center
                 ? [envelope.upper, envelope.center, envelope.lower]
                 : [envelope.upper, envelope.lower];
+        }
+
+        case 'spread': {
+            const seriesForSpread = envelopeSourceSeries.filter((series) => (series.length ?? 0) > 0);
+            if (seriesForSpread.length < 2) {
+                return [];
+            }
+
+            const sampleCount = seriesForSpread.reduce((max, series) => Math.max(max, series.length ?? 0), 0);
+            const spreadValues = new Float32Array(sampleCount);
+            let lastValue = 0;
+
+            for (let i = 0; i < sampleCount; i++) {
+                let minValue = Infinity;
+                let maxValue = -Infinity;
+
+                for (const series of seriesForSpread) {
+                    if (i >= series.length) {
+                        continue;
+                    }
+
+                    const value = Number(series[i]);
+                    if (!Number.isFinite(value)) {
+                        continue;
+                    }
+
+                    if (value < minValue) minValue = value;
+                    if (value > maxValue) maxValue = value;
+                }
+
+                if (Number.isFinite(minValue) && Number.isFinite(maxValue)) {
+                    lastValue = maxValue - minValue;
+                }
+
+                spreadValues[i] = lastValue;
+            }
+
+            return [{
+                kind: 'series-spread',
+                label: 'Spread',
+                values: spreadValues,
+            }];
+        }
+
+        case 'delta': {
+            const seriesForDelta = envelopeSourceSeries.filter((series) => (series.length ?? 0) > 0);
+            if (seriesForDelta.length < 2) {
+                return [];
+            }
+
+            const first = seriesForDelta[0];
+            const second = seriesForDelta[1];
+            const sampleCount = Math.max(first.length ?? 0, second.length ?? 0);
+            const deltaValues = new Float32Array(sampleCount);
+            let lastValue = 0;
+
+            for (let i = 0; i < sampleCount; i++) {
+                const firstValue = i < first.length ? Number(first[i]) : Number.NaN;
+                const secondValue = i < second.length ? Number(second[i]) : Number.NaN;
+
+                if (Number.isFinite(firstValue) && Number.isFinite(secondValue)) {
+                    lastValue = firstValue - secondValue;
+                }
+
+                deltaValues[i] = lastValue;
+            }
+
+            return [{
+                kind: 'series-delta',
+                label: 'Delta',
+                values: deltaValues,
+            }];
+        }
+
+        case 'threshold-violations': {
+            const sourceSeries = envelopeSourceSeries.filter((series) => (series.length ?? 0) > 0);
+            const seriesForThreshold = sourceSeries.length > 0 ? sourceSeries : [values];
+            const sampleCount = seriesForThreshold.reduce((max, series) => Math.max(max, series.length ?? 0), 0);
+
+            let lowThreshold = Number.isFinite(analysisToolboxPreferences.thresholdLow)
+                ? analysisToolboxPreferences.thresholdLow
+                : -1;
+            let highThreshold = Number.isFinite(analysisToolboxPreferences.thresholdHigh)
+                ? analysisToolboxPreferences.thresholdHigh
+                : 1;
+
+            if (lowThreshold > highThreshold) {
+                const tmp = lowThreshold;
+                lowThreshold = highThreshold;
+                highThreshold = tmp;
+            }
+
+            const aboveValues = new Float32Array(sampleCount);
+            const belowValues = new Float32Array(sampleCount);
+
+            for (let i = 0; i < sampleCount; i++) {
+                let aboveValue = highThreshold;
+                let belowValue = lowThreshold;
+
+                for (const series of seriesForThreshold) {
+                    if (i >= series.length) {
+                        continue;
+                    }
+
+                    const value = Number(series[i]);
+                    if (!Number.isFinite(value)) {
+                        continue;
+                    }
+
+                    if (value > aboveValue) {
+                        aboveValue = value;
+                    }
+                    if (value < belowValue) {
+                        belowValue = value;
+                    }
+                }
+
+                aboveValues[i] = aboveValue;
+                belowValues[i] = belowValue;
+            }
+
+            return [
+                {
+                    kind: 'threshold-above',
+                    label: 'Above',
+                    values: aboveValues,
+                },
+                {
+                    kind: 'threshold-below',
+                    label: 'Below',
+                    values: belowValues,
+                },
+            ];
         }
     }
 }
@@ -1914,6 +2090,8 @@ async function refreshAnalysisToolboxOverlays(force = false): Promise<void> {
         analysisToolboxPreferences.mode,
         Math.max(1, Math.floor(analysisToolboxPreferences.windowSize)).toString(),
         Number.isFinite(analysisToolboxPreferences.sigma) ? analysisToolboxPreferences.sigma.toFixed(3) : 'NaN',
+        Number.isFinite(analysisToolboxPreferences.thresholdLow) ? analysisToolboxPreferences.thresholdLow.toFixed(3) : 'NaN',
+        Number.isFinite(analysisToolboxPreferences.thresholdHigh) ? analysisToolboxPreferences.thresholdHigh.toFixed(3) : 'NaN',
     ];
 
     if (currentViewMode === 'binary') {
@@ -2281,6 +2459,8 @@ function setupButtonHandlers(): void {
     const analysisToolboxModeSelect = document.getElementById('analysisToolboxModeSelect') as HTMLSelectElement;
     const analysisToolboxWindowInput = document.getElementById('analysisToolboxWindowInput') as HTMLInputElement;
     const analysisToolboxSigmaInput = document.getElementById('analysisToolboxSigmaInput') as HTMLInputElement;
+    const analysisToolboxThresholdLowInput = document.getElementById('analysisToolboxThresholdLowInput') as HTMLInputElement;
+    const analysisToolboxThresholdHighInput = document.getElementById('analysisToolboxThresholdHighInput') as HTMLInputElement;
     const analysisToolboxApplyBtn = document.getElementById('analysisToolboxApplyBtn') as HTMLButtonElement;
     const analysisToolboxLegend = document.getElementById('analysisToolboxLegend') as HTMLDivElement;
 
@@ -2351,7 +2531,7 @@ function setupButtonHandlers(): void {
         analysisToolboxPreferences.autoRefresh = analysisToolboxAutoRefresh.checked;
 
         const selectedMode = analysisToolboxModeSelect.value;
-        if (selectedMode === 'ema' || selectedMode === 'moving-average' || selectedMode === 'noise-band' || selectedMode === 'envelope') {
+        if (selectedMode === 'ema' || selectedMode === 'moving-average' || selectedMode === 'noise-band' || selectedMode === 'envelope' || selectedMode === 'spread' || selectedMode === 'delta' || selectedMode === 'threshold-violations') {
             analysisToolboxPreferences.mode = selectedMode;
         }
 
@@ -2364,6 +2544,16 @@ function setupButtonHandlers(): void {
         analysisToolboxPreferences.sigma = Number.isFinite(parsedSigma) && parsedSigma > 0
             ? parsedSigma
             : 2;
+
+        const parsedThresholdLow = Number.parseFloat(analysisToolboxThresholdLowInput.value);
+        analysisToolboxPreferences.thresholdLow = Number.isFinite(parsedThresholdLow)
+            ? parsedThresholdLow
+            : -1;
+
+        const parsedThresholdHigh = Number.parseFloat(analysisToolboxThresholdHighInput.value);
+        analysisToolboxPreferences.thresholdHigh = Number.isFinite(parsedThresholdHigh)
+            ? parsedThresholdHigh
+            : 1;
     };
 
     const triggerAnalysisToolboxRefresh = (force: boolean, statusMessage?: string): void => {
@@ -2488,7 +2678,7 @@ function setupButtonHandlers(): void {
             scheduleBinaryCompareSync();
             renderBinaryBrowser();
 
-            if (analysisToolboxPreferences.enabled && analysisToolboxPreferences.mode === 'envelope') {
+            if (analysisToolboxPreferences.enabled) {
                 analysisToolboxLastConfigKey = '';
                 void refreshAnalysisToolboxOverlays(true);
             }
@@ -2571,6 +2761,25 @@ function setupButtonHandlers(): void {
         }
     });
 
+    analysisToolboxThresholdLowInput.addEventListener('change', () => {
+        readAnalysisToolboxPreferencesFromUi();
+        analysisToolboxLastConfigKey = '';
+        if (analysisToolboxPreferences.enabled && analysisToolboxPreferences.autoRefresh) {
+            triggerAnalysisToolboxRefresh(true, 'Updating analysis toolbox low threshold...');
+        } else {
+            refreshAnalysisToolboxControls();
+        }
+    });
+
+    analysisToolboxThresholdHighInput.addEventListener('change', () => {
+        readAnalysisToolboxPreferencesFromUi();
+        analysisToolboxLastConfigKey = '';
+        if (analysisToolboxPreferences.enabled && analysisToolboxPreferences.autoRefresh) {
+            triggerAnalysisToolboxRefresh(true, 'Updating analysis toolbox high threshold...');
+        } else {
+            refreshAnalysisToolboxControls();
+        }
+    });
     analysisToolboxApplyBtn.addEventListener('click', () => {
         readAnalysisToolboxPreferencesFromUi();
         analysisToolboxLastConfigKey = '';
