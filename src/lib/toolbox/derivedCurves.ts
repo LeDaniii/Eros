@@ -11,7 +11,10 @@ export type DerivedCurveKind =
     | 'rolling-mean'
     | 'rolling-stddev'
     | 'rolling-upper-band'
-    | 'rolling-lower-band';
+    | 'rolling-lower-band'
+    | 'envelope-upper'
+    | 'envelope-lower'
+    | 'envelope-center';
 
 export interface DerivedCurve {
     kind: DerivedCurveKind;
@@ -68,6 +71,19 @@ export interface NoiseBandCurveOptions {
     centerLabel?: string;
     upperLabel?: string;
     lowerLabel?: string;
+}
+
+export interface EnvelopeCurves {
+    upper: DerivedCurve;
+    lower: DerivedCurve;
+    center?: DerivedCurve;
+}
+
+export interface EnvelopeCurveOptions {
+    includeCenter?: boolean;
+    upperLabel?: string;
+    lowerLabel?: string;
+    centerLabel?: string;
 }
 
 function normalizeSigma(sigma: number | undefined): number {
@@ -210,3 +226,76 @@ export function createNoiseBandCurves(values: ArrayLike<number>, options: NoiseB
         },
     };
 }
+
+/**
+ * Build a point-wise envelope across multiple series.
+ * Upper = max(series[i]), lower = min(series[i]) per sample index.
+ */
+export function createEnvelopeCurves(
+    series: Array<ArrayLike<number>>,
+    options: EnvelopeCurveOptions = {}
+): EnvelopeCurves {
+    const validSeries = series.filter((entry) => (entry.length ?? 0) > 0);
+    if (validSeries.length < 1) {
+        throw new Error('Envelope requires at least one non-empty series.');
+    }
+
+    const sampleCount = validSeries.reduce((max, entry) => Math.max(max, entry.length ?? 0), 0);
+    const upperValues = new Float32Array(sampleCount);
+    const lowerValues = new Float32Array(sampleCount);
+    const centerValues = new Float32Array(sampleCount);
+
+    for (let i = 0; i < sampleCount; i++) {
+        let minValue = Infinity;
+        let maxValue = -Infinity;
+
+        for (const values of validSeries) {
+            if (i >= values.length) {
+                continue;
+            }
+
+            const value = Number(values[i]);
+            if (!Number.isFinite(value)) {
+                continue;
+            }
+
+            if (value < minValue) minValue = value;
+            if (value > maxValue) maxValue = value;
+        }
+
+        if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+            const previousIndex = Math.max(0, i - 1);
+            lowerValues[i] = i > 0 ? lowerValues[previousIndex] : 0;
+            upperValues[i] = i > 0 ? upperValues[previousIndex] : 0;
+        } else {
+            lowerValues[i] = minValue;
+            upperValues[i] = maxValue;
+        }
+
+        centerValues[i] = (lowerValues[i] + upperValues[i]) * 0.5;
+    }
+
+    const curves: EnvelopeCurves = {
+        upper: {
+            kind: 'envelope-upper',
+            label: options.upperLabel ?? 'Envelope max',
+            values: upperValues,
+        },
+        lower: {
+            kind: 'envelope-lower',
+            label: options.lowerLabel ?? 'Envelope min',
+            values: lowerValues,
+        },
+    };
+
+    if (options.includeCenter) {
+        curves.center = {
+            kind: 'envelope-center',
+            label: options.centerLabel ?? 'Envelope center',
+            values: centerValues,
+        };
+    }
+
+    return curves;
+}
+

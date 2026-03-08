@@ -32,6 +32,7 @@ export {
     computeRollingMeanStdDev,
     createDerivedCurve,
     createNoiseBandCurves,
+    createEnvelopeCurves,
 } from './toolbox';
 export type {
     EmaOptions,
@@ -46,6 +47,8 @@ export type {
     RollingMeanDerivedCurveSpec,
     RollingStdDevDerivedCurveSpec,
     RollingBandDerivedCurveSpec,
+    EnvelopeCurves,
+    EnvelopeCurveOptions,
 } from './toolbox';
 
 // === Virtual Core (large curves: chunked / out-of-core) ===

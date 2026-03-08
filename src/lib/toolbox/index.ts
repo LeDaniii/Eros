@@ -6,6 +6,7 @@ export {
 export {
     createDerivedCurve,
     createNoiseBandCurves,
+    createEnvelopeCurves,
 } from './derivedCurves';
 
 export type {
@@ -23,4 +24,6 @@ export type {
     RollingMeanDerivedCurveSpec,
     RollingStdDevDerivedCurveSpec,
     RollingBandDerivedCurveSpec,
+    EnvelopeCurves,
+    EnvelopeCurveOptions,
 } from './derivedCurves';

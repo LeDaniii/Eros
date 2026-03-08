@@ -15,6 +15,7 @@ import { VirtualCurveEngine } from './lib/core-virtual/VirtualCurveEngine';
 import {
     createDerivedCurve,
     createNoiseBandCurves,
+    createEnvelopeCurves,
     type DerivedCurve,
 } from './lib';
 import { getPlotRect } from './lib/renderer/plotLayout';
@@ -37,7 +38,7 @@ interface DemoViewportStrategyState {
     isFrozen: boolean;
 }
 
-type AnalysisToolboxMode = 'ema' | 'moving-average' | 'noise-band';
+type AnalysisToolboxMode = 'ema' | 'moving-average' | 'noise-band' | 'envelope';
 
 let chart: DemoChart | null = null;
 let isStreaming = false;
@@ -47,13 +48,14 @@ let binaryOverlayCanvases: HTMLCanvasElement[] = [];
 let binaryCompareSyncFrameId: number | null = null;
 let analysisToolboxOverlayCharts: ErosChart[] = [];
 let analysisToolboxOverlayCanvases: HTMLCanvasElement[] = [];
+let analysisToolboxBandCanvas: HTMLCanvasElement | null = null;
 let analysisToolboxSyncFrameId: number | null = null;
 let analysisToolboxRefreshInFlight = false;
 let analysisToolboxLastSampleCount = -1;
 let analysisToolboxLastConfigKey = '';
 let analysisToolboxLastAutoRefreshMs = 0;
 let analysisToolboxOverlaySignature = '';
-let analysisToolboxRawValues: Float32Array | null = null;
+let analysisToolboxRawSeries: Array<ArrayLike<number>> = [];
 let analysisToolboxDerivedCurves: DerivedCurve[] = [];
 let analysisToolboxCurveStyles: AnalysisToolboxCurveStyle[] = [];
 let analysisToolboxLegendMarkupKey = '';
@@ -362,6 +364,7 @@ function createControlPanel(): HTMLDivElement {
                     <option value="ema" selected>EMA center line</option>
                     <option value="moving-average">Moving average</option>
                     <option value="noise-band">Mean + noise band</option>
+                    <option value="envelope">Envelope (multi-curve)</option>
                 </select>
                 <button id="analysisToolboxApplyBtn"
                         style="padding:4px 8px; background:#5a4314; color:#fff0c2; border:1px solid #d4a53a; cursor:pointer; font-weight:bold; font-size:10px; border-radius:4px;">
@@ -520,14 +523,21 @@ function isAnalysisChartInstance(value: DemoChart | null): value is ErosChart {
     return value instanceof ErosChart;
 }
 
-function canUseAnalysisToolbox(): boolean {
-    return (
-        isAnalysisChartInstance(chart)
-        && currentViewMode !== 'binary'
-        && displayModePreferences.mode === 'analysis'
-    );
-}
+function getVisibleBinaryToolboxEntries(includeAllWhenNoneVisible = false): ImportedBinaryEntry[] {
+    const visibleEntries = importedBinaryEntries.filter((entry) => entry.visible && entry.decoded.values.length > 0);
+    if (visibleEntries.length > 0 || !includeAllWhenNoneVisible) {
+        return visibleEntries;
+    }
 
+    return importedBinaryEntries.filter((entry) => entry.decoded.values.length > 0);
+}
+function canUseAnalysisToolbox(): boolean {
+    if (currentViewMode === 'binary') {
+        return isAnalysisChartInstance(chart) && importedBinaryEntries.length > 0;
+    }
+
+    return displayModePreferences.mode === 'analysis' && isAnalysisChartInstance(chart);
+}
 function getActiveAnalysisToolboxChart(): ErosChart | null {
     return canUseAnalysisToolbox() && isAnalysisChartInstance(chart) ? chart : null;
 }
@@ -625,9 +635,11 @@ function refreshAnalysisToolboxControls(): void {
         return;
     }
 
-    const analysisModeSelected = displayModePreferences.mode === 'analysis';
+    const analysisModeSelected = displayModePreferences.mode === 'analysis' || currentViewMode === 'binary';
     const toolboxAvailable = canUseAnalysisToolbox();
     const sigmaRelevant = analysisToolboxPreferences.mode === 'noise-band';
+    const envelopeSourceCount = currentViewMode === 'binary' ? getVisibleBinaryToolboxEntries().length : 1;
+    const envelopeReady = analysisToolboxPreferences.mode !== 'envelope' || envelopeSourceCount >= 2;
 
     panel.style.display = analysisModeSelected ? 'block' : 'none';
     enableInput.checked = analysisToolboxPreferences.enabled;
@@ -642,7 +654,7 @@ function refreshAnalysisToolboxControls(): void {
     modeSelect.disabled = !controlsEnabled || !analysisToolboxPreferences.enabled;
     windowInput.disabled = !controlsEnabled || !analysisToolboxPreferences.enabled;
     sigmaInput.disabled = !controlsEnabled || !analysisToolboxPreferences.enabled || !sigmaRelevant;
-    applyBtn.disabled = !controlsEnabled || !analysisToolboxPreferences.enabled || !toolboxAvailable;
+    applyBtn.disabled = !controlsEnabled || !analysisToolboxPreferences.enabled || !toolboxAvailable || !envelopeReady;
 
     const baseColor = toolboxAvailable ? '#fff1c6' : '#c0ab74';
     applyBtn.style.opacity = applyBtn.disabled ? '0.6' : '1';
@@ -662,24 +674,28 @@ function refreshAnalysisToolboxControls(): void {
             return '<div style="opacity:0.8;">Create/start an analysis chart first</div>';
         }
 
+        if (!envelopeReady) {
+            return '<div style="opacity:0.8;">Envelope needs at least 2 visible curves</div>';
+        }
+
         if (analysisToolboxDerivedCurves.length < 1) {
             return '<div style="opacity:0.8;">No toolbox curves yet (press APPLY or wait for data)</div>';
         }
 
         return analysisToolboxDerivedCurves.map((curve, index) => {
-            const style = analysisToolboxCurveStyles[index] ?? {
-                visible: true,
-                color: getAnalysisToolboxCurveColor(index),
-            };
-            const safeLabel = escapeHtml(curve.label);
+            const style = analysisToolboxCurveStyles[index] ?? getDefaultAnalysisToolboxCurveStyle(curve, index);
+            const safeLabel = escapeHtml((curve.label ?? '').trim());
             const rowOpacity = style.visible ? 1 : 0.55;
+            const labelMarkup = safeLabel.length > 0
+                ? `<span style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${safeLabel}</span>`
+                : '';
             return `<div style="display:flex; align-items:center; gap:6px; margin-top:${index === 0 ? 0 : 4}px; opacity:${rowOpacity};">
                 <input type="checkbox" data-toolbox-curve-index="${index}" data-toolbox-curve-action="visible" ${style.visible ? 'checked' : ''}
                        title="Show/hide toolbox curve" style="margin:0; accent-color:${style.color}; cursor:pointer;" />
                 <input type="color" data-toolbox-curve-index="${index}" data-toolbox-curve-action="color" value="${style.color}"
                        title="Toolbox curve color" style="width:22px; height:16px; padding:0; border:none; background:transparent; cursor:pointer;" />
                 <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${style.color}; box-shadow:0 0 4px ${style.color};"></span>
-                <span style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${safeLabel}</span>
+                ${labelMarkup}
             </div>`;
         }).join('');
     };
@@ -710,16 +726,25 @@ function refreshAnalysisToolboxControls(): void {
         return;
     }
 
-    const visibleLabels = analysisToolboxDerivedCurves
-        .filter((_, index) => analysisToolboxCurveStyles[index]?.visible !== false)
-        .map((curve) => curve.label);
-    const hiddenCount = Math.max(0, analysisToolboxDerivedCurves.length - visibleLabels.length);
+    if (!envelopeReady) {
+        info.textContent = 'Envelope mode needs at least 2 visible curves';
+        return;
+    }
+
+    const visibleCurves = analysisToolboxDerivedCurves
+        .filter((_, index) => analysisToolboxCurveStyles[index]?.visible !== false);
+    const visibleLabels = visibleCurves
+        .map((curve) => (curve.label ?? '').trim())
+        .filter((label) => label.length > 0);
+    const hiddenCount = Math.max(0, analysisToolboxDerivedCurves.length - visibleCurves.length);
     const totalSamples = chart?.getStats().totalSamples ?? 0;
+    const visibleSummary = visibleLabels.length > 0
+        ? visibleLabels.join(' | ')
+        : `${visibleCurves.length} curve(s)`;
     info.textContent = analysisToolboxDerivedCurves.length > 0
-        ? `Active: ${visibleLabels.join(' | ') || 'none'}${hiddenCount > 0 ? ` | hidden: ${hiddenCount}` : ''} | ${totalSamples.toLocaleString()} samples`
+        ? `Active: ${visibleSummary}${hiddenCount > 0 ? ` | hidden: ${hiddenCount}` : ''} | ${totalSamples.toLocaleString()} samples`
         : 'Enabled (no overlay data yet). Press APPLY or wait for samples.';
 }
-
 function clampInteger(value: number, min: number, max: number): number {
     const normalized = Math.floor(value);
     return Math.max(min, Math.min(max, normalized));
@@ -1454,6 +1479,83 @@ function createAnalysisToolboxOverlayCanvas(_zIndex: number): HTMLCanvasElement 
     return canvas;
 }
 
+function createAnalysisToolboxBandCanvas(): HTMLCanvasElement {
+    if (analysisToolboxBandCanvas && analysisToolboxBandCanvas.isConnected) {
+        return analysisToolboxBandCanvas;
+    }
+
+    const container = getPlotContainer();
+    const canvas = document.createElement('canvas');
+    canvas.width = container.clientWidth;
+    canvas.height = container.clientHeight;
+    canvas.style.position = 'absolute';
+    canvas.style.top = '0';
+    canvas.style.left = '0';
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.style.pointerEvents = 'none';
+    canvas.style.zIndex = '1';
+    canvas.dataset.role = 'analysis-toolbox-band';
+    container.appendChild(canvas);
+    analysisToolboxBandCanvas = canvas;
+    return canvas;
+}
+
+function clearAnalysisToolboxBandCanvas(): void {
+    if (!analysisToolboxBandCanvas) {
+        return;
+    }
+
+    const context = analysisToolboxBandCanvas.getContext('2d');
+    if (!context) {
+        return;
+    }
+
+    context.clearRect(0, 0, analysisToolboxBandCanvas.width, analysisToolboxBandCanvas.height);
+}
+
+function destroyAnalysisToolboxBandCanvas(): void {
+    if (!analysisToolboxBandCanvas) {
+        return;
+    }
+
+    analysisToolboxBandCanvas.remove();
+    analysisToolboxBandCanvas = null;
+}
+
+function toRgba(color: string, alpha: number): string {
+    const normalized = color.trim().replace('#', '');
+    const safeAlpha = Math.max(0, Math.min(1, alpha));
+
+    if (/^[0-9a-fA-F]{3}$/.test(normalized)) {
+        const r = Number.parseInt(normalized[0] + normalized[0], 16);
+        const g = Number.parseInt(normalized[1] + normalized[1], 16);
+        const b = Number.parseInt(normalized[2] + normalized[2], 16);
+        return `rgba(${r}, ${g}, ${b}, ${safeAlpha})`;
+    }
+
+    if (/^[0-9a-fA-F]{6}$/.test(normalized)) {
+        const r = Number.parseInt(normalized.slice(0, 2), 16);
+        const g = Number.parseInt(normalized.slice(2, 4), 16);
+        const b = Number.parseInt(normalized.slice(4, 6), 16);
+        return `rgba(${r}, ${g}, ${b}, ${safeAlpha})`;
+    }
+
+    return `rgba(255, 209, 102, ${safeAlpha})`;
+}
+
+function getDefaultAnalysisToolboxCurveStyle(curve: DerivedCurve, index: number): AnalysisToolboxCurveStyle {
+    switch (curve.kind) {
+        case 'envelope-upper':
+            return { visible: true, color: '#ff6b6b' };
+        case 'envelope-lower':
+            return { visible: true, color: '#4aa3ff' };
+        case 'envelope-center':
+            return { visible: true, color: '#ffd166' };
+        default:
+            return { visible: true, color: getAnalysisToolboxCurveColor(index) };
+    }
+}
 function destroyAnalysisToolboxOverlayCharts(clearBaseYRange = true): void {
     if (analysisToolboxSyncFrameId !== null) {
         cancelAnimationFrame(analysisToolboxSyncFrameId);
@@ -1470,9 +1572,10 @@ function destroyAnalysisToolboxOverlayCharts(clearBaseYRange = true): void {
         overlayCanvas.remove();
     }
     analysisToolboxOverlayCanvases = [];
+    destroyAnalysisToolboxBandCanvas();
 
     analysisToolboxOverlaySignature = '';
-    analysisToolboxRawValues = null;
+    analysisToolboxRawSeries = [];
     analysisToolboxDerivedCurves = [];
     analysisToolboxLastSampleCount = -1;
     analysisToolboxLastConfigKey = '';
@@ -1484,7 +1587,10 @@ function destroyAnalysisToolboxOverlayCharts(clearBaseYRange = true): void {
     }
 }
 
-function buildAnalysisToolboxDerivedCurves(values: ArrayLike<number>): DerivedCurve[] {
+function buildAnalysisToolboxDerivedCurves(
+    values: ArrayLike<number>,
+    envelopeSourceSeries: Array<ArrayLike<number>> = []
+): DerivedCurve[] {
     const windowSize = Math.max(1, Math.floor(analysisToolboxPreferences.windowSize));
     const sigma = Number.isFinite(analysisToolboxPreferences.sigma) && analysisToolboxPreferences.sigma > 0
         ? analysisToolboxPreferences.sigma
@@ -1499,15 +1605,32 @@ function buildAnalysisToolboxDerivedCurves(values: ArrayLike<number>): DerivedCu
             const band = createNoiseBandCurves(values, { windowSize, sigma });
             return [band.center, band.upper, band.lower];
         }
+        case 'envelope': {
+            const seriesForEnvelope = envelopeSourceSeries.filter((series) => (series.length ?? 0) > 0);
+            if (seriesForEnvelope.length < 2) {
+                return [];
+            }
+
+            const envelope = createEnvelopeCurves(seriesForEnvelope, {
+                includeCenter: true,
+                upperLabel: '',
+                lowerLabel: '',
+                centerLabel: '',
+            });
+
+            return envelope.center
+                ? [envelope.upper, envelope.center, envelope.lower]
+                : [envelope.upper, envelope.lower];
+        }
     }
 }
-
 function syncAnalysisToolboxCurveStylesWithDerivedCurves(): void {
-    analysisToolboxCurveStyles = analysisToolboxDerivedCurves.map((_, index) => {
+    analysisToolboxCurveStyles = analysisToolboxDerivedCurves.map((curve, index) => {
         const previous = analysisToolboxCurveStyles[index];
+        const fallback = getDefaultAnalysisToolboxCurveStyle(curve, index);
         return {
-            visible: previous?.visible ?? true,
-            color: previous?.color ?? getAnalysisToolboxCurveColor(index),
+            visible: previous?.visible ?? fallback.visible,
+            color: previous?.color ?? fallback.color,
         };
     });
 }
@@ -1531,8 +1654,8 @@ function applyAnalysisToolboxCurveStyles(): void {
 }
 
 function computeSharedAnalysisToolboxYRange(startIndex: number, endIndex: number): { min: number; max: number } | null {
-    const rawValues = analysisToolboxRawValues;
-    if (!rawValues || rawValues.length < 1) {
+    const rawSeries = analysisToolboxRawSeries.filter((values) => (values.length ?? 0) > 0);
+    if (rawSeries.length < 1) {
         return null;
     }
 
@@ -1540,7 +1663,7 @@ function computeSharedAnalysisToolboxYRange(startIndex: number, endIndex: number
         .map((curve, index) => ({ curve, style: analysisToolboxCurveStyles[index] }))
         .filter((entry) => entry.style?.visible !== false)
         .map((entry) => entry.curve.values);
-    const series: Array<ArrayLike<number>> = [rawValues, ...visibleDerivedSeries];
+    const series: Array<ArrayLike<number>> = [...rawSeries, ...visibleDerivedSeries];
     let minValue = Infinity;
     let maxValue = -Infinity;
 
@@ -1581,12 +1704,124 @@ function computeSharedAnalysisToolboxYRange(startIndex: number, endIndex: number
         max: maxValue + padding,
     };
 }
+function drawAnalysisEnvelopeBand(
+    startIndex: number,
+    endIndex: number,
+    sharedRange: { min: number; max: number } | null
+): void {
+    if (analysisToolboxPreferences.mode !== 'envelope' || !sharedRange) {
+        clearAnalysisToolboxBandCanvas();
+        return;
+    }
 
+    const upperIndex = analysisToolboxDerivedCurves.findIndex((curve) => curve.kind === 'envelope-upper');
+    const lowerIndex = analysisToolboxDerivedCurves.findIndex((curve) => curve.kind === 'envelope-lower');
+    if (upperIndex < 0 || lowerIndex < 0) {
+        clearAnalysisToolboxBandCanvas();
+        return;
+    }
+
+    const upperStyle = analysisToolboxCurveStyles[upperIndex];
+    const lowerStyle = analysisToolboxCurveStyles[lowerIndex];
+    if (upperStyle?.visible === false || lowerStyle?.visible === false) {
+        clearAnalysisToolboxBandCanvas();
+        return;
+    }
+
+    const upperValues = analysisToolboxDerivedCurves[upperIndex].values;
+    const lowerValues = analysisToolboxDerivedCurves[lowerIndex].values;
+    const maxLength = Math.min(upperValues.length, lowerValues.length);
+    if (maxLength < 2) {
+        clearAnalysisToolboxBandCanvas();
+        return;
+    }
+
+    const container = getPlotContainer();
+    const canvas = createAnalysisToolboxBandCanvas();
+    if (canvas.width !== container.clientWidth || canvas.height !== container.clientHeight) {
+        canvas.width = container.clientWidth;
+        canvas.height = container.clientHeight;
+    }
+
+    const context = canvas.getContext('2d');
+    if (!context) {
+        return;
+    }
+
+    context.clearRect(0, 0, canvas.width, canvas.height);
+
+    const plot = getPlotRect(canvas.width, canvas.height);
+    const yRange = sharedRange.max - sharedRange.min;
+    if (!Number.isFinite(yRange) || yRange <= 0) {
+        return;
+    }
+
+    const start = Math.max(0, Math.min(maxLength - 1, Math.floor(startIndex)));
+    const end = Math.max(start + 1, Math.min(maxLength, Math.ceil(endIndex)));
+    if (end - start < 2) {
+        return;
+    }
+
+    const visibleCount = Math.max(1, endIndex - startIndex);
+    const maxPoints = 2000;
+    const step = Math.max(1, Math.floor((end - start) / maxPoints));
+
+    const indices: number[] = [];
+    for (let i = start; i < end; i += step) {
+        indices.push(i);
+    }
+    if (indices[indices.length - 1] !== end - 1) {
+        indices.push(end - 1);
+    }
+
+    const xForIndex = (sampleIndex: number): number => {
+        const normalizedX = (sampleIndex - startIndex) / visibleCount;
+        return plot.left + normalizedX * plot.width;
+    };
+
+    const yForValue = (value: number): number => {
+        const normalizedY = (value - sharedRange.min) / yRange;
+        const ndcYInPlot = (normalizedY * 2 - 1) * 0.95;
+        const yPlot01 = 1 - (ndcYInPlot * 0.5 + 0.5);
+        const y = plot.top + yPlot01 * plot.height;
+        return Math.max(plot.top, Math.min(plot.bottom, y));
+    };
+
+    context.beginPath();
+
+    for (let i = 0; i < indices.length; i++) {
+        const sampleIndex = indices[i];
+        const x = xForIndex(sampleIndex);
+        const y = yForValue(upperValues[sampleIndex]);
+        if (i === 0) {
+            context.moveTo(x, y);
+        } else {
+            context.lineTo(x, y);
+        }
+    }
+
+    for (let i = indices.length - 1; i >= 0; i--) {
+        const sampleIndex = indices[i];
+        const x = xForIndex(sampleIndex);
+        const y = yForValue(lowerValues[sampleIndex]);
+        context.lineTo(x, y);
+    }
+
+    context.closePath();
+    const centerCurve = analysisToolboxDerivedCurves.find((curve) => curve.kind === 'envelope-center');
+    const centerStyle = centerCurve
+        ? analysisToolboxCurveStyles[analysisToolboxDerivedCurves.indexOf(centerCurve)]
+        : null;
+    const fillColor = centerStyle?.color ?? '#ffd166';
+    context.fillStyle = toRgba(fillColor, 0.18);
+    context.fill();
+}
 function syncAnalysisToolboxCharts(): void {
     analysisToolboxSyncFrameId = null;
 
     const baseChart = getActiveAnalysisToolboxChart();
     if (!baseChart || analysisToolboxOverlayCharts.length === 0) {
+        clearAnalysisToolboxBandCanvas();
         return;
     }
 
@@ -1601,6 +1836,7 @@ function syncAnalysisToolboxCharts(): void {
         for (const overlayChart of analysisToolboxOverlayCharts) {
             overlayChart.clearYRangeOverride();
         }
+        clearAnalysisToolboxBandCanvas();
         return;
     }
 
@@ -1608,8 +1844,9 @@ function syncAnalysisToolboxCharts(): void {
     for (const overlayChart of analysisToolboxOverlayCharts) {
         overlayChart.setYRangeOverride(sharedRange.min, sharedRange.max);
     }
-}
 
+    drawAnalysisEnvelopeBand(startIndex, endIndex, sharedRange);
+}
 function scheduleAnalysisToolboxSync(): void {
     if (analysisToolboxSyncFrameId !== null) {
         return;
@@ -1673,11 +1910,20 @@ async function refreshAnalysisToolboxOverlays(force = false): Promise<void> {
         return;
     }
 
-    const configKey = [
+    const configKeyParts: string[] = [
         analysisToolboxPreferences.mode,
-        Math.max(1, Math.floor(analysisToolboxPreferences.windowSize)),
+        Math.max(1, Math.floor(analysisToolboxPreferences.windowSize)).toString(),
         Number.isFinite(analysisToolboxPreferences.sigma) ? analysisToolboxPreferences.sigma.toFixed(3) : 'NaN',
-    ].join('|');
+    ];
+
+    if (currentViewMode === 'binary') {
+        const visibilityKey = importedBinaryEntries
+            .map((entry) => `${entry.visible ? 1 : 0}:${entry.decoded.values.length}`)
+            .join(',');
+        configKeyParts.push(visibilityKey);
+    }
+
+    const configKey = configKeyParts.join('|');
 
     const baseStats = baseChart.getStats();
     if (baseStats.totalSamples < 1) {
@@ -1694,16 +1940,28 @@ async function refreshAnalysisToolboxOverlays(force = false): Promise<void> {
     try {
         const exported = baseChart.exportBinary();
         const decoded = ErosChart.decodeBinary(exported);
-        const derivedCurves = buildAnalysisToolboxDerivedCurves(decoded.values);
+
+        const binaryEntriesForToolbox = currentViewMode === 'binary'
+            ? getVisibleBinaryToolboxEntries()
+            : [];
+        const rawSeriesForRange: Array<ArrayLike<number>> = binaryEntriesForToolbox.length > 0
+            ? binaryEntriesForToolbox.map((entry) => entry.decoded.values)
+            : [decoded.values];
+        const envelopeSourceSeries: Array<ArrayLike<number>> = binaryEntriesForToolbox.length > 0
+            ? binaryEntriesForToolbox.map((entry) => entry.decoded.values)
+            : [decoded.values];
+
+        const derivedCurves = buildAnalysisToolboxDerivedCurves(decoded.values, envelopeSourceSeries);
 
         if (derivedCurves.length < 1) {
             destroyAnalysisToolboxOverlayCharts();
+            refreshAnalysisToolboxControls();
             return;
         }
 
         await ensureAnalysisToolboxOverlayCharts(derivedCurves.length, decoded.sampleRate, baseStats.bufferSize);
 
-        analysisToolboxRawValues = decoded.values;
+        analysisToolboxRawSeries = rawSeriesForRange;
         analysisToolboxDerivedCurves = derivedCurves;
         syncAnalysisToolboxCurveStylesWithDerivedCurves();
 
@@ -1726,7 +1984,6 @@ async function refreshAnalysisToolboxOverlays(force = false): Promise<void> {
         analysisToolboxRefreshInFlight = false;
     }
 }
-
 function formatBinaryDuration(seconds: number): string {
     if (!Number.isFinite(seconds)) return '0s';
     if (seconds >= 10) return `${seconds.toFixed(2)}s`;
@@ -2094,7 +2351,7 @@ function setupButtonHandlers(): void {
         analysisToolboxPreferences.autoRefresh = analysisToolboxAutoRefresh.checked;
 
         const selectedMode = analysisToolboxModeSelect.value;
-        if (selectedMode === 'ema' || selectedMode === 'moving-average' || selectedMode === 'noise-band') {
+        if (selectedMode === 'ema' || selectedMode === 'moving-average' || selectedMode === 'noise-band' || selectedMode === 'envelope') {
             analysisToolboxPreferences.mode = selectedMode;
         }
 
@@ -2195,6 +2452,7 @@ function setupButtonHandlers(): void {
     const setViewMode = (mode: 'idle' | 'live' | 'binary'): void => {
         currentViewMode = mode;
         if (mode === 'binary') {
+            displayModePreferences.mode = 'analysis';
             clearVirtualAnalysisSession();
             destroyAnalysisToolboxOverlayCharts(false);
         } else if (mode !== 'live') {
@@ -2204,7 +2462,6 @@ function setupButtonHandlers(): void {
         refreshAnalysisToolboxControls();
         refreshChunkOverlayControls();
     };
-
     const handleBinaryCurveControlChange = (target: EventTarget | null, rerenderUi: boolean): void => {
         if (!(target instanceof HTMLInputElement)) {
             return;
@@ -2230,6 +2487,11 @@ function setupButtonHandlers(): void {
             applyBinaryCurveStyles();
             scheduleBinaryCompareSync();
             renderBinaryBrowser();
+
+            if (analysisToolboxPreferences.enabled && analysisToolboxPreferences.mode === 'envelope') {
+                analysisToolboxLastConfigKey = '';
+                void refreshAnalysisToolboxOverlays(true);
+            }
             return;
         }
 
