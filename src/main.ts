@@ -17,6 +17,7 @@ import {
     createNoiseBandCurves,
     type DerivedCurve,
 } from './lib';
+import { getPlotRect } from './lib/renderer/plotLayout';
 import { MeasurementService } from './gen/measurements_pb';
 
 // ==========================================
@@ -57,6 +58,9 @@ let analysisToolboxDerivedCurves: DerivedCurve[] = [];
 let analysisToolboxCurveStyles: AnalysisToolboxCurveStyle[] = [];
 let analysisToolboxLegendMarkupKey = '';
 const booleanStripSamples: number[] = [];
+let chunkOverlayCanvas: HTMLCanvasElement | null = null;
+let chunkOverlaySyncFrameId: number | null = null;
+let chunkOverlayEnabled = false;
 
 interface ImportedBinaryEntry {
     fileName: string;
@@ -307,6 +311,10 @@ function createControlPanel(): HTMLDivElement {
                 style="width: 100%; padding: 8px; background: #444; color: #0f0; border: 1px solid #0f0; cursor: pointer; font-weight: bold; font-size: 12px; border-radius: 5px;">
             RESET ZOOM
         </button>
+        <button id="toggleChunkOverlayBtn"
+                style="width: 100%; margin-top: 8px; padding: 8px; background: #222; color: #b8c3b8; border: 1px solid #3f5a3f; cursor: pointer; font-weight: bold; font-size: 12px; border-radius: 5px;">
+            CHUNK OVERLAY: OFF
+        </button>
         <div style="margin-top: 10px; border: 1px solid #2f4f2f; border-radius: 6px; padding: 8px; background: rgba(15, 30, 15, 0.55);">
             <div style="font-size: 11px; color: #9de89d; margin-bottom: 6px; font-weight: bold;">DISPLAY MODE</div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
@@ -386,6 +394,10 @@ function createControlPanel(): HTMLDivElement {
         <button id="loadBinaryBtnServer"
              style="width: 100%; margin-top: 8px; padding: 8px; background: #1f3f6f; color: #d5e8ff; border: 1px solid #4aa3ff; cursor: pointer; font-weight: bold; font-size: 12px; border-radius: 5px;">
          LOAD .EROSB from server
+        </button>
+        <button id="loadBinaryVirtualUrlBtn"
+             style="width: 100%; margin-top: 8px; padding: 8px; background: #51360f; color: #ffe7bf; border: 1px solid #e3ad57; cursor: pointer; font-weight: bold; font-size: 12px; border-radius: 5px;">
+         LOAD .EROSB VIRTUAL URL
         </button>
         <div style="margin-top: 10px; border: 1px solid #3f5c1f; border-radius: 6px; padding: 8px; background: rgba(22, 35, 10, 0.65);">
             <div style="font-size: 11px; color: #b9f27c; margin-bottom: 6px; font-weight: bold;">DEMO BINARY GENERATOR</div>
@@ -473,34 +485,9 @@ function updateDataStats(): void {
             const viewport = chart.getViewportRange();
             const chunkSamples = Math.max(1, virtualAnalysisSession.engine.chunkSamples);
             const chunkCount = Math.max(1, virtualAnalysisSession.engine.chunkCount);
-
-            let globalStartSample = 0;
-            let globalEndSample = 1;
-
-            if (virtualAnalysisSession.mode === 'preview') {
-                globalStartSample = Math.max(0, Math.floor(viewport.startIndex * virtualAnalysisSession.sampleStride));
-                globalEndSample = Math.min(
-                    virtualAnalysisSession.originalSampleCount,
-                    Math.ceil(viewport.endIndex * virtualAnalysisSession.sampleStride)
-                );
-            } else {
-                globalStartSample = virtualAnalysisSession.exactWindowStartSample + Math.floor(viewport.startIndex);
-                globalEndSample = virtualAnalysisSession.exactWindowStartSample + Math.ceil(viewport.endIndex);
-                globalStartSample = clampInteger(
-                    globalStartSample,
-                    0,
-                    Math.max(0, virtualAnalysisSession.originalSampleCount - 1)
-                );
-                globalEndSample = clampInteger(
-                    globalEndSample,
-                    globalStartSample + 1,
-                    virtualAnalysisSession.originalSampleCount
-                );
-            }
-
-            if (globalEndSample <= globalStartSample) {
-                globalEndSample = Math.min(virtualAnalysisSession.originalSampleCount, globalStartSample + 1);
-            }
+            const globalRange = resolveVirtualGlobalViewportRange(virtualAnalysisSession, viewport);
+            const globalStartSample = globalRange.globalStartSample;
+            const globalEndSample = globalRange.globalEndSample;
 
             const currentChunkStart = clampInteger(
                 Math.floor(globalStartSample / chunkSamples),
@@ -620,6 +607,7 @@ function refreshDisplayModeControls(): void {
         : 'Mode: no chart';
 
     refreshAnalysisToolboxControls();
+    refreshChunkOverlayControls();
 }
 
 function refreshAnalysisToolboxControls(): void {
@@ -737,6 +725,294 @@ function clampInteger(value: number, min: number, max: number): number {
     return Math.max(min, Math.min(max, normalized));
 }
 
+function resolveVirtualGlobalViewportRange(
+    session: VirtualAnalysisSession,
+    viewport: { startIndex: number; endIndex: number }
+): { globalStartSample: number; globalEndSample: number } {
+    let globalStartSample = 0;
+    let globalEndSample = 1;
+
+    if (session.mode === 'preview') {
+        globalStartSample = Math.max(0, Math.floor(viewport.startIndex * session.sampleStride));
+        globalEndSample = Math.min(
+            session.originalSampleCount,
+            Math.ceil(viewport.endIndex * session.sampleStride)
+        );
+    } else {
+        globalStartSample = session.exactWindowStartSample + Math.floor(viewport.startIndex);
+        globalEndSample = session.exactWindowStartSample + Math.ceil(viewport.endIndex);
+        globalStartSample = clampInteger(
+            globalStartSample,
+            0,
+            Math.max(0, session.originalSampleCount - 1)
+        );
+        globalEndSample = clampInteger(
+            globalEndSample,
+            globalStartSample + 1,
+            session.originalSampleCount
+        );
+    }
+
+    if (globalEndSample <= globalStartSample) {
+        globalEndSample = Math.min(session.originalSampleCount, globalStartSample + 1);
+    }
+
+    return {
+        globalStartSample,
+        globalEndSample,
+    };
+}
+
+function canRenderChunkOverlay(): boolean {
+    return (
+        !!virtualAnalysisSession
+        && currentViewMode === 'live'
+        && displayModePreferences.mode === 'analysis'
+        && isAnalysisChartInstance(chart)
+    );
+}
+
+function ensureChunkOverlayCanvas(): HTMLCanvasElement {
+    if (chunkOverlayCanvas && chunkOverlayCanvas.isConnected) {
+        return chunkOverlayCanvas;
+    }
+
+    const container = getPlotContainer();
+    const canvas = document.createElement('canvas');
+    canvas.width = container.clientWidth;
+    canvas.height = container.clientHeight;
+    canvas.style.position = 'absolute';
+    canvas.style.top = '0';
+    canvas.style.left = '0';
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.style.pointerEvents = 'none';
+    canvas.style.zIndex = '3';
+    canvas.dataset.role = 'chunk-overlay';
+    container.appendChild(canvas);
+    chunkOverlayCanvas = canvas;
+    return canvas;
+}
+
+function clearChunkOverlayCanvas(): void {
+    if (!chunkOverlayCanvas) {
+        return;
+    }
+
+    const context = chunkOverlayCanvas.getContext('2d');
+    if (!context) {
+        return;
+    }
+
+    context.clearRect(0, 0, chunkOverlayCanvas.width, chunkOverlayCanvas.height);
+}
+
+function removeChunkOverlayCanvas(): void {
+    if (chunkOverlaySyncFrameId !== null) {
+        cancelAnimationFrame(chunkOverlaySyncFrameId);
+        chunkOverlaySyncFrameId = null;
+    }
+
+    if (chunkOverlayCanvas) {
+        chunkOverlayCanvas.remove();
+        chunkOverlayCanvas = null;
+    }
+}
+
+function renderChunkOverlay(): void {
+    if (!chunkOverlayEnabled || !canRenderChunkOverlay()) {
+        removeChunkOverlayCanvas();
+        return;
+    }
+
+    const session = virtualAnalysisSession;
+    const activeChart = chart;
+    if (!session || !activeChart || !isAnalysisChartInstance(activeChart)) {
+        removeChunkOverlayCanvas();
+        return;
+    }
+
+    const overlay = ensureChunkOverlayCanvas();
+    const container = getPlotContainer();
+    if (overlay.width !== container.clientWidth || overlay.height !== container.clientHeight) {
+        overlay.width = container.clientWidth;
+        overlay.height = container.clientHeight;
+    }
+
+    const context = overlay.getContext('2d');
+    if (!context) {
+        return;
+    }
+
+    context.clearRect(0, 0, overlay.width, overlay.height);
+
+    const plot = getPlotRect(overlay.width, overlay.height);
+    const viewport = activeChart.getViewportRange();
+    const globalRange = resolveVirtualGlobalViewportRange(session, viewport);
+    const globalStartSample = globalRange.globalStartSample;
+    const globalEndSample = globalRange.globalEndSample;
+    const visibleGlobalSamples = Math.max(1, globalEndSample - globalStartSample);
+
+    const chunkSamples = Math.max(1, session.engine.chunkSamples);
+    const chunkCount = Math.max(1, session.engine.chunkCount);
+    const firstChunk = clampInteger(Math.floor(globalStartSample / chunkSamples), 0, chunkCount - 1);
+    const lastChunk = clampInteger(
+        Math.floor(Math.max(globalStartSample, globalEndSample - 1) / chunkSamples),
+        firstChunk,
+        chunkCount - 1
+    );
+    const visibleChunkCount = Math.max(1, lastChunk - firstChunk + 1);
+
+    const sampleToX = (sample: number): number => {
+        const normalized = (sample - globalStartSample) / visibleGlobalSamples;
+        return plot.left + normalized * plot.width;
+    };
+
+    context.save();
+    context.beginPath();
+    context.rect(plot.left, plot.top, plot.width, plot.height);
+    context.clip();
+
+    if (visibleChunkCount <= 256) {
+        for (let chunkIndex = firstChunk; chunkIndex <= lastChunk; chunkIndex++) {
+            if ((chunkIndex & 1) === 1) {
+                continue;
+            }
+
+            const chunkStart = chunkIndex * chunkSamples;
+            const chunkEnd = Math.min(session.originalSampleCount, chunkStart + chunkSamples);
+            const drawStart = Math.max(globalStartSample, chunkStart);
+            const drawEnd = Math.min(globalEndSample, chunkEnd);
+            if (drawEnd <= drawStart) {
+                continue;
+            }
+
+            const x1 = sampleToX(drawStart);
+            const x2 = sampleToX(drawEnd);
+            context.fillStyle = 'rgba(255, 193, 7, 0.08)';
+            context.fillRect(x1, plot.top, Math.max(1, x2 - x1), plot.height);
+        }
+    }
+
+    const lineStep = Math.max(1, Math.ceil(visibleChunkCount / 90));
+    context.beginPath();
+    context.strokeStyle = 'rgba(255, 209, 102, 0.45)';
+    context.lineWidth = 1;
+
+    for (let chunkIndex = firstChunk; chunkIndex <= lastChunk + 1; chunkIndex += lineStep) {
+        const boundarySample = chunkIndex * chunkSamples;
+        const clampedSample = Math.max(globalStartSample, Math.min(globalEndSample, boundarySample));
+        const x = sampleToX(clampedSample) + 0.5;
+        context.moveTo(x, plot.top);
+        context.lineTo(x, plot.bottom);
+    }
+
+    const finalBoundaryX = sampleToX(globalEndSample) + 0.5;
+    context.moveTo(finalBoundaryX, plot.top);
+    context.lineTo(finalBoundaryX, plot.bottom);
+    context.stroke();
+
+    if (session.mode === 'exact') {
+        const exactStart = session.exactWindowStartSample;
+        const exactEnd = session.exactWindowStartSample + session.exactWindowSampleCount;
+        const drawExactEdge = (sample: number): void => {
+            if (sample < globalStartSample || sample > globalEndSample) {
+                return;
+            }
+
+            const x = sampleToX(sample) + 0.5;
+            context.beginPath();
+            context.strokeStyle = 'rgba(255, 107, 107, 0.8)';
+            context.lineWidth = 1;
+            context.moveTo(x, plot.top);
+            context.lineTo(x, plot.bottom);
+            context.stroke();
+        };
+
+        drawExactEdge(exactStart);
+        drawExactEdge(exactEnd);
+    }
+
+    if (visibleChunkCount <= 28) {
+        context.fillStyle = 'rgba(255, 230, 180, 0.9)';
+        context.font = '10px monospace';
+        context.textAlign = 'center';
+        context.textBaseline = 'top';
+
+        for (let chunkIndex = firstChunk; chunkIndex <= lastChunk; chunkIndex++) {
+            const chunkStart = chunkIndex * chunkSamples;
+            const chunkEnd = Math.min(session.originalSampleCount, chunkStart + chunkSamples);
+            const drawStart = Math.max(globalStartSample, chunkStart);
+            const drawEnd = Math.min(globalEndSample, chunkEnd);
+            if (drawEnd <= drawStart) {
+                continue;
+            }
+
+            const x1 = sampleToX(drawStart);
+            const x2 = sampleToX(drawEnd);
+            if (x2 - x1 < 22) {
+                continue;
+            }
+
+            context.fillText(String(chunkIndex + 1), (x1 + x2) * 0.5, plot.top + 2);
+        }
+    }
+
+    context.restore();
+
+    const label = `Chunks ${firstChunk + 1}-${lastChunk + 1} | Virtual ${session.mode.toUpperCase()}`;
+    context.font = '11px monospace';
+    context.textAlign = 'left';
+    context.textBaseline = 'top';
+    const labelWidth = context.measureText(label).width + 10;
+    const labelHeight = 18;
+    const labelX = plot.left + 6;
+    const labelY = plot.top + 6;
+
+    context.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    context.fillRect(labelX, labelY, labelWidth, labelHeight);
+    context.strokeStyle = 'rgba(255, 209, 102, 0.85)';
+    context.lineWidth = 1;
+    context.strokeRect(labelX, labelY, labelWidth, labelHeight);
+    context.fillStyle = '#ffd166';
+    context.fillText(label, labelX + 5, labelY + 4);
+}
+
+function scheduleChunkOverlaySync(): void {
+    if (chunkOverlaySyncFrameId !== null) {
+        return;
+    }
+
+    chunkOverlaySyncFrameId = requestAnimationFrame(() => {
+        chunkOverlaySyncFrameId = null;
+        renderChunkOverlay();
+    });
+}
+
+function refreshChunkOverlayControls(): void {
+    const toggleBtn = document.getElementById('toggleChunkOverlayBtn') as HTMLButtonElement | null;
+    if (!toggleBtn) {
+        return;
+    }
+
+    const available = canRenderChunkOverlay();
+    toggleBtn.textContent = chunkOverlayEnabled ? 'CHUNK OVERLAY: ON' : 'CHUNK OVERLAY: OFF';
+    toggleBtn.style.background = chunkOverlayEnabled ? '#5a4314' : '#222';
+    toggleBtn.style.color = chunkOverlayEnabled ? '#fff0c2' : '#b8c3b8';
+    toggleBtn.style.borderColor = chunkOverlayEnabled ? '#ffd166' : '#3f5a3f';
+    toggleBtn.style.opacity = available ? '1' : '0.65';
+
+    if (!chunkOverlayEnabled || !available) {
+        clearChunkOverlayCanvas();
+        if (!available) {
+            removeChunkOverlayCanvas();
+        }
+        return;
+    }
+
+    scheduleChunkOverlaySync();
+}
+
 function isVirtualAnalysisActive(): boolean {
     return virtualAnalysisSession !== null && currentViewMode === 'live' && displayModePreferences.mode === 'analysis';
 }
@@ -752,6 +1028,7 @@ function clearVirtualAnalysisSession(): void {
     if (session) {
         void Promise.resolve(session.engine.close()).catch(() => undefined);
     }
+    refreshChunkOverlayControls();
 }
 
 async function withVirtualLoadingGuard(
@@ -795,6 +1072,7 @@ function scheduleVirtualAnalysisSync(): void {
 function onPrimaryChartViewportChanged(): void {
     scheduleAnalysisToolboxSync();
     scheduleVirtualAnalysisSync();
+    scheduleChunkOverlaySync();
 }
 
 async function applyVirtualPreviewWindow(
@@ -830,6 +1108,7 @@ async function applyVirtualPreviewWindow(
         session.mode = 'preview';
         session.exactWindowStartSample = 0;
         session.exactWindowSampleCount = 0;
+        scheduleChunkOverlaySync();
         scheduleVirtualAnalysisSync();
     });
 }
@@ -874,6 +1153,7 @@ async function applyVirtualExactWindow(
         session.mode = 'exact';
         session.exactWindowStartSample = clampedWindowStart;
         session.exactWindowSampleCount = values.length;
+        scheduleChunkOverlaySync();
         scheduleVirtualAnalysisSync();
     });
 }
@@ -987,6 +1267,42 @@ async function activateVirtualAnalysisSession(
         maxCachedChunks: 64,
         autoPrefetchNeighborChunks: VIRTUAL_PREFETCH_NEIGHBOR_CHUNKS,
     });
+
+    const session: VirtualAnalysisSession = {
+        engine,
+        fileName: entry.fileName,
+        color: entry.color,
+        originalSampleRate: Math.max(1, decodedResult.originalSampleRate),
+        originalSampleCount: Math.max(1, decodedResult.originalSampleCount),
+        sampleStride: Math.max(1, decodedResult.sampleStride),
+        previewValues: decodedResult.decoded.values,
+        previewSampleRate: Math.max(1, decodedResult.decoded.sampleRate),
+        mode: 'preview',
+        exactWindowStartSample: 0,
+        exactWindowSampleCount: 0,
+        isLoading: false,
+        pendingSync: false,
+    };
+
+    virtualAnalysisSession = session;
+    await applyVirtualPreviewWindow(session);
+}
+
+async function activateVirtualAnalysisSessionFromUrl(
+    entry: ImportedBinaryEntry,
+    sourceUrl: string,
+    decodedResult: BinaryImportDecodeResult
+): Promise<void> {
+    clearVirtualAnalysisSession();
+
+    const engine = await VirtualCurveEngine.openFromUrl(
+        sourceUrl,
+        {},
+        {
+            maxCachedChunks: 64,
+            autoPrefetchNeighborChunks: VIRTUAL_PREFETCH_NEIGHBOR_CHUNKS,
+        }
+    );
 
     const session: VirtualAnalysisSession = {
         engine,
@@ -1681,8 +1997,10 @@ setInterval(() => {
 function setupButtonHandlers(): void {
     const startBtn = document.getElementById('startBtn') as HTMLButtonElement;
     const resetZoomBtn = document.getElementById('resetZoomBtn') as HTMLButtonElement;
+    const toggleChunkOverlayBtn = document.getElementById('toggleChunkOverlayBtn') as HTMLButtonElement;
     const downloadBinaryBtn = document.getElementById('downloadBinaryBtn') as HTMLButtonElement;
     const loadBinaryBtnServer = document.getElementById('loadBinaryBtnServer') as HTMLButtonElement;
+    const loadBinaryVirtualUrlBtn = document.getElementById('loadBinaryVirtualUrlBtn') as HTMLButtonElement;
     const generateDemoBinaryBtn = document.getElementById('generateDemoBinaryBtn') as HTMLButtonElement;
     const demoBinarySizeInput = document.getElementById('demoBinarySizeInput') as HTMLInputElement;
     const demoBinarySizeUnit = document.getElementById('demoBinarySizeUnit') as HTMLSelectElement;
@@ -1884,6 +2202,7 @@ function setupButtonHandlers(): void {
         }
         renderBinaryBrowser();
         refreshAnalysisToolboxControls();
+        refreshChunkOverlayControls();
     };
 
     const handleBinaryCurveControlChange = (target: EventTarget | null, rerenderUi: boolean): void => {
@@ -2163,6 +2482,16 @@ function setupButtonHandlers(): void {
         updateStatus('Viewport reset');
     });
 
+    toggleChunkOverlayBtn.addEventListener('click', () => {
+        chunkOverlayEnabled = !chunkOverlayEnabled;
+        if (chunkOverlayEnabled && !canRenderChunkOverlay()) {
+            updateStatus('Chunk overlay armed. Load a virtual curve in analysis mode to visualize chunks.');
+        } else {
+            updateStatus(chunkOverlayEnabled ? 'Chunk overlay enabled.' : 'Chunk overlay disabled.');
+        }
+        refreshChunkOverlayControls();
+    });
+
     demoBinarySizeInput.addEventListener('input', () => {
         refreshDemoBinaryGeneratorControls();
     });
@@ -2221,6 +2550,76 @@ function setupButtonHandlers(): void {
         updateStatus(
             `Generating demo binary download (${formatBinarySize(actualBytes)}, ${formatDemoGenerationDuration(durationSeconds)} @ ${sampleRate.toLocaleString()} Hz)...`
         );
+    });
+
+    loadBinaryVirtualUrlBtn.addEventListener('click', async () => {
+        try {
+            updateStatus('Loading virtual preview from server URL...');
+
+            const previewResponse = await fetch('/api/virtual-preview');
+            if (!previewResponse.ok) {
+                throw new Error(`HTTP ${previewResponse.status}`);
+            }
+
+            const previewBuffer = await previewResponse.arrayBuffer();
+            if (previewBuffer.byteLength < 24) {
+                throw new Error('Virtual preview payload is empty.');
+            }
+
+            const decodedPreview = ErosChart.decodeBinary(previewBuffer);
+
+            const parsedStride = Number.parseInt(previewResponse.headers.get('x-preview-sample-stride') ?? '1', 10);
+            const parsedOriginalSampleRate = Number.parseInt(previewResponse.headers.get('x-original-sample-rate') ?? '0', 10);
+            const parsedOriginalSampleCount = Number.parseInt(previewResponse.headers.get('x-original-sample-count') ?? '0', 10);
+            const sourceFileName = previewResponse.headers.get('x-file-name') ?? 'server-virtual.erosb';
+
+            const sampleStride = Number.isFinite(parsedStride) && parsedStride > 0 ? parsedStride : 1;
+            const originalSampleRate = Number.isFinite(parsedOriginalSampleRate) && parsedOriginalSampleRate > 0
+                ? parsedOriginalSampleRate
+                : Math.max(1, decodedPreview.sampleRate * sampleStride);
+            const originalSampleCount = Number.isFinite(parsedOriginalSampleCount) && parsedOriginalSampleCount > 0
+                ? parsedOriginalSampleCount
+                : Math.max(1, decodedPreview.values.length * sampleStride);
+
+            const decodedResult: BinaryImportDecodeResult = {
+                decoded: decodedPreview,
+                coreMode: 'virtual',
+                sampleStride,
+                originalSampleRate,
+                originalSampleCount,
+            };
+
+            const singleEntry: ImportedBinaryEntry = {
+                fileName: sourceFileName,
+                decoded: decodedPreview,
+                fileSizeBytes: 20 + originalSampleCount * 4,
+                color: getBinaryCurveColor(0),
+                visible: true,
+            };
+
+            importedBinaryEntries = [];
+            setViewMode('live');
+            await activateVirtualAnalysisSessionFromUrl(singleEntry, '/api/virtual-file', decodedResult);
+
+            sampleRateInput.value = String(Math.max(1, originalSampleRate));
+            const durationSeconds = originalSampleRate > 0
+                ? originalSampleCount / originalSampleRate
+                : 0;
+            if (Number.isFinite(durationSeconds) && durationSeconds > 0) {
+                durationInput.value = Math.max(1, Math.round(durationSeconds)).toString();
+            }
+
+            isStreaming = false;
+            resetStartButtonState();
+            refreshDisplayModeControls();
+
+            updateStatus(
+                `Virtual URL loaded (${originalSampleCount.toLocaleString()} samples @ ${originalSampleRate.toLocaleString()} Hz, stride ${sampleStride}x).`
+            );
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            updateStatus(`Virtual URL load failed: ${message}`);
+        }
     });
 
     loadBinaryBtnServer.addEventListener('click', async () => {
@@ -2570,6 +2969,7 @@ function setupButtonHandlers(): void {
     renderBinaryBrowser();
     refreshDemoBinaryGeneratorControls();
     refreshDisplayModeControls();
+    refreshChunkOverlayControls();
 }
 
 // ==========================================

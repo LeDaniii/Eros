@@ -8,6 +8,8 @@ import {
     BooleanStatusTickSchema,
 } from "./gen/measurements_pb.js";
 import { createReadStream, statSync } from "node:fs";
+import { open as openFile } from "node:fs/promises";
+import { basename } from "node:path";
 
 // ========================
 // Kurven-Generator (aus dem File-Script kopiert)
@@ -19,6 +21,11 @@ const EROS_BINARY_HEADER_SIZE = 20;
 const EROS_BINARY_MAX_SAMPLE_COUNT = 0xffffffff;
 const EROS_BINARY_MAX_FILE_SIZE_BYTES = EROS_BINARY_HEADER_SIZE + EROS_BINARY_MAX_SAMPLE_COUNT * 4;
 const DEMO_BINARY_PATTERN_SAMPLE_COUNT = 262_144; // 1 MiB float payload chunk
+const VIRTUAL_PREVIEW_TARGET_SAMPLES = 24_000_000;
+const VIRTUAL_PREVIEW_CHUNK_SAMPLES = 1_048_576;
+const VIRTUAL_DEMO_FILE_PATH = "C:\\Users\\dmatzer\\Downloads\\eros-demo-4096MiB-10000Hz.erosb";
+
+let cachedVirtualPreview = null;
 
 function createMulberry32Random(seedNumber) {
     let internalState = seedNumber >>> 0;
@@ -341,8 +348,17 @@ const allowedOrigins = [
 ];
 
 const allowedHeaders =
-    "Content-Type, Connect-Protocol-Version, Connect-Timeout-Ms, Grpc-Timeout, Authorization";
-const exposedHeaders = "Content-Length, Content-Disposition, X-File-Name";
+    "Content-Type, Connect-Protocol-Version, Connect-Timeout-Ms, Grpc-Timeout, Authorization, Range";
+const exposedHeaders = [
+    "Content-Length",
+    "Content-Disposition",
+    "Content-Range",
+    "Accept-Ranges",
+    "X-File-Name",
+    "X-Preview-Sample-Stride",
+    "X-Original-Sample-Rate",
+    "X-Original-Sample-Count",
+].join(", ");
 
 function isLanOrLocalhostOrigin(origin) {
     if (!origin) return false;
@@ -540,10 +556,299 @@ async function streamDemoBinaryFile(response, options) {
     response.end();
 }
 
+function parseErosBinaryHeaderFromBuffer(headerBuffer, fileSizeBytes) {
+    if (!Buffer.isBuffer(headerBuffer) || headerBuffer.byteLength < EROS_BINARY_HEADER_SIZE) {
+        throw new Error("Invalid EROS file: header too small.");
+    }
+
+    for (let i = 0; i < EROS_BINARY_MAGIC.length; i++) {
+        if (headerBuffer[i] !== EROS_BINARY_MAGIC[i]) {
+            throw new Error("Invalid EROS file: magic header mismatch.");
+        }
+    }
+
+    const version = headerBuffer.readUInt16LE(4);
+    if (version !== EROS_BINARY_VERSION) {
+        throw new Error(`Unsupported EROS file version: ${version}.`);
+    }
+
+    const sampleRate = headerBuffer.readUInt32LE(8);
+    const sampleCount = headerBuffer.readUInt32LE(12);
+    if (!Number.isFinite(sampleRate) || sampleRate < 1) {
+        throw new Error("Invalid EROS file: sampleRate must be > 0.");
+    }
+
+    const expectedFileSizeBytes = EROS_BINARY_HEADER_SIZE + sampleCount * 4;
+    if (fileSizeBytes !== expectedFileSizeBytes) {
+        throw new Error(
+            `Invalid EROS file: payload size mismatch (expected ${expectedFileSizeBytes}, got ${fileSizeBytes}).`
+        );
+    }
+
+    return {
+        version,
+        sampleRate,
+        sampleCount,
+    };
+}
+
+function getVirtualSourceFileInfo() {
+    const stats = statSync(VIRTUAL_DEMO_FILE_PATH);
+    return {
+        filePath: VIRTUAL_DEMO_FILE_PATH,
+        fileName: basename(VIRTUAL_DEMO_FILE_PATH),
+        sizeBytes: stats.size,
+        mtimeMs: stats.mtimeMs,
+    };
+}
+
+function parseSingleByteRange(rangeHeader, totalSizeBytes) {
+    if (!rangeHeader) {
+        return { kind: "none" };
+    }
+
+    const normalized = String(rangeHeader).trim();
+    if (!normalized || normalized.includes(",")) {
+        return { kind: "invalid" };
+    }
+
+    const match = /^bytes=(\d*)-(\d*)$/i.exec(normalized);
+    if (!match) {
+        return { kind: "invalid" };
+    }
+
+    const startRaw = match[1];
+    const endRaw = match[2];
+    if (startRaw === "" && endRaw === "") {
+        return { kind: "invalid" };
+    }
+
+    let startInclusive = 0;
+    let endInclusive = totalSizeBytes - 1;
+
+    if (startRaw === "") {
+        const suffixLength = Number(endRaw);
+        if (!Number.isFinite(suffixLength) || suffixLength <= 0) {
+            return { kind: "invalid" };
+        }
+
+        const normalizedSuffixLength = Math.floor(suffixLength);
+        startInclusive = Math.max(0, totalSizeBytes - normalizedSuffixLength);
+        endInclusive = Math.max(0, totalSizeBytes - 1);
+    } else {
+        startInclusive = Number(startRaw);
+        if (!Number.isFinite(startInclusive) || startInclusive < 0) {
+            return { kind: "invalid" };
+        }
+        startInclusive = Math.floor(startInclusive);
+
+        if (endRaw !== "") {
+            endInclusive = Number(endRaw);
+            if (!Number.isFinite(endInclusive) || endInclusive < startInclusive) {
+                return { kind: "invalid" };
+            }
+            endInclusive = Math.floor(endInclusive);
+        }
+    }
+
+    if (startInclusive >= totalSizeBytes) {
+        return { kind: "unsatisfiable" };
+    }
+
+    endInclusive = Math.min(endInclusive, totalSizeBytes - 1);
+    return {
+        kind: "partial",
+        startInclusive,
+        endInclusive,
+    };
+}
+
+function streamVirtualSourceFile(request, response) {
+    let sourceInfo;
+    try {
+        sourceInfo = getVirtualSourceFileInfo();
+    } catch (error) {
+        response.statusCode = 500;
+        response.setHeader("Content-Type", "application/json");
+        response.end(JSON.stringify({
+            error: "Configured virtual source file is unavailable.",
+            detail: error instanceof Error ? error.message : String(error),
+        }));
+        return;
+    }
+
+    response.setHeader("Content-Type", "application/octet-stream");
+    response.setHeader("Accept-Ranges", "bytes");
+    response.setHeader("Cache-Control", "no-store");
+    response.setHeader("X-File-Name", sourceInfo.fileName);
+
+    if (request.method === "HEAD") {
+        response.statusCode = 200;
+        response.setHeader("Content-Length", String(sourceInfo.sizeBytes));
+        response.end();
+        return;
+    }
+
+    const rangeInfo = parseSingleByteRange(request.headers.range, sourceInfo.sizeBytes);
+    if (rangeInfo.kind === "invalid" || rangeInfo.kind === "unsatisfiable") {
+        response.statusCode = 416;
+        response.setHeader("Content-Range", `bytes */${sourceInfo.sizeBytes}`);
+        response.end();
+        return;
+    }
+
+    let readStream;
+    if (rangeInfo.kind === "partial") {
+        const contentLength = rangeInfo.endInclusive - rangeInfo.startInclusive + 1;
+        response.statusCode = 206;
+        response.setHeader("Content-Length", String(contentLength));
+        response.setHeader(
+            "Content-Range",
+            `bytes ${rangeInfo.startInclusive}-${rangeInfo.endInclusive}/${sourceInfo.sizeBytes}`
+        );
+        readStream = createReadStream(sourceInfo.filePath, {
+            start: rangeInfo.startInclusive,
+            end: rangeInfo.endInclusive,
+        });
+    } else {
+        response.statusCode = 200;
+        response.setHeader("Content-Length", String(sourceInfo.sizeBytes));
+        readStream = createReadStream(sourceInfo.filePath);
+    }
+
+    readStream.on("error", (error) => {
+        console.error("[VirtualFile] Stream failed:", error);
+        if (!response.headersSent) {
+            response.statusCode = 500;
+            response.setHeader("Content-Type", "application/json");
+            response.end(JSON.stringify({ error: "Virtual file stream failed." }));
+            return;
+        }
+
+        if (!response.writableEnded) {
+            response.destroy(error);
+        }
+    });
+
+    readStream.pipe(response);
+}
+
+async function buildVirtualPreviewFromSourceFile(filePath, fileSizeBytes) {
+    const fileHandle = await openFile(filePath, "r");
+    try {
+        const headerBuffer = Buffer.alloc(EROS_BINARY_HEADER_SIZE);
+        let headerReadOffset = 0;
+        while (headerReadOffset < EROS_BINARY_HEADER_SIZE) {
+            const { bytesRead } = await fileHandle.read(
+                headerBuffer,
+                headerReadOffset,
+                EROS_BINARY_HEADER_SIZE - headerReadOffset,
+                headerReadOffset
+            );
+            if (bytesRead <= 0) {
+                throw new Error("Unable to read complete EROS header.");
+            }
+            headerReadOffset += bytesRead;
+        }
+
+        const sourceHeader = parseErosBinaryHeaderFromBuffer(headerBuffer, fileSizeBytes);
+        const sampleStride = Math.max(1, Math.ceil(sourceHeader.sampleCount / VIRTUAL_PREVIEW_TARGET_SAMPLES));
+        const targetSampleCount = Math.max(1, Math.ceil(sourceHeader.sampleCount / sampleStride));
+        const previewValues = new Float32Array(targetSampleCount);
+        let writeIndex = 0;
+        let nextSampleIndex = 0;
+
+        for (
+            let chunkStart = 0;
+            chunkStart < sourceHeader.sampleCount;
+            chunkStart += VIRTUAL_PREVIEW_CHUNK_SAMPLES
+        ) {
+            const chunkEnd = Math.min(sourceHeader.sampleCount, chunkStart + VIRTUAL_PREVIEW_CHUNK_SAMPLES);
+            const chunkSampleCount = Math.max(0, chunkEnd - chunkStart);
+            if (chunkSampleCount < 1) {
+                continue;
+            }
+
+            const chunkBytes = chunkSampleCount * 4;
+            const chunkBuffer = Buffer.allocUnsafe(chunkBytes);
+            const payloadByteOffset = EROS_BINARY_HEADER_SIZE + chunkStart * 4;
+            let readOffset = 0;
+
+            while (readOffset < chunkBytes) {
+                const { bytesRead } = await fileHandle.read(
+                    chunkBuffer,
+                    readOffset,
+                    chunkBytes - readOffset,
+                    payloadByteOffset + readOffset
+                );
+                if (bytesRead <= 0) {
+                    throw new Error(`Unexpected EOF while reading source chunk at sample ${chunkStart}.`);
+                }
+                readOffset += bytesRead;
+            }
+
+            if (nextSampleIndex < chunkStart) {
+                const delta = chunkStart - nextSampleIndex;
+                const skippedStrides = Math.ceil(delta / sampleStride);
+                nextSampleIndex += skippedStrides * sampleStride;
+            }
+
+            while (nextSampleIndex < chunkEnd && writeIndex < previewValues.length) {
+                const localSampleIndex = nextSampleIndex - chunkStart;
+                previewValues[writeIndex] = chunkBuffer.readFloatLE(localSampleIndex * 4);
+                writeIndex++;
+                nextSampleIndex += sampleStride;
+            }
+        }
+
+        const finalPreviewValues = writeIndex === previewValues.length
+            ? previewValues
+            : previewValues.slice(0, writeIndex);
+        const previewSampleRate = Math.max(1, Math.round(sourceHeader.sampleRate / sampleStride));
+        const previewHeaderBuffer = createErosBinaryHeaderBuffer(previewSampleRate, finalPreviewValues.length);
+        const previewPayloadBuffer = Buffer.from(
+            finalPreviewValues.buffer,
+            finalPreviewValues.byteOffset,
+            finalPreviewValues.byteLength
+        );
+        const previewFileBuffer = Buffer.concat([previewHeaderBuffer, previewPayloadBuffer]);
+
+        return {
+            previewFileBuffer,
+            sourceHeader,
+            sampleStride,
+        };
+    } finally {
+        await fileHandle.close();
+    }
+}
+
+async function warmupVirtualPreviewCache() {
+    const sourceInfo = getVirtualSourceFileInfo();
+    const cacheKey = `${sourceInfo.filePath}|${sourceInfo.sizeBytes}|${sourceInfo.mtimeMs}`;
+    if (cachedVirtualPreview?.cacheKey === cacheKey) {
+        return cachedVirtualPreview;
+    }
+
+    const builtPreview = await buildVirtualPreviewFromSourceFile(sourceInfo.filePath, sourceInfo.sizeBytes);
+    cachedVirtualPreview = {
+        cacheKey,
+        sourceInfo,
+        ...builtPreview,
+    };
+    return cachedVirtualPreview;
+}
+
 startBooleanStatusTicker();
 
-http.createServer((request, response) => {
+const server = http.createServer((request, response) => {
     const origin = request.headers.origin || "";
+    let requestPath = "/";
+    try {
+        requestPath = new URL(request.url ?? "/", "http://localhost").pathname;
+    } catch {
+        requestPath = "/";
+    }
 
     // Erlaubt localhost und private LAN-IPs fuer Browser im lokalen Netz
     if (allowedOrigins.includes(origin) || isLanOrLocalhostOrigin(origin)) {
@@ -553,13 +858,42 @@ http.createServer((request, response) => {
     }
 
     response.setHeader("Vary", "Origin");
-    response.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+    response.setHeader("Access-Control-Allow-Methods", "POST, GET, HEAD, OPTIONS");
     response.setHeader("Access-Control-Allow-Headers", allowedHeaders);
     response.setHeader("Access-Control-Expose-Headers", exposedHeaders);
 
     if (request.method === "OPTIONS") {
         response.statusCode = 204;
         response.end();
+        return;
+    }
+
+    if ((request.method === "GET" || request.method === "HEAD") && requestPath === "/api/virtual-file") {
+        streamVirtualSourceFile(request, response);
+        return;
+    }
+
+    if (request.method === "GET" && requestPath === "/api/virtual-preview") {
+        if (!cachedVirtualPreview) {
+            response.statusCode = 503;
+            response.setHeader("Content-Type", "application/json");
+            response.end(JSON.stringify({
+                error: "Virtual preview cache is not ready.",
+            }));
+            return;
+        }
+
+        const previewFileName = cachedVirtualPreview.sourceInfo.fileName.replace(/\.erosb$/i, "") + ".preview.erosb";
+
+        response.statusCode = 200;
+        response.setHeader("Content-Type", "application/octet-stream");
+        response.setHeader("Content-Length", String(cachedVirtualPreview.previewFileBuffer.byteLength));
+        response.setHeader("Cache-Control", "no-store");
+        response.setHeader("X-File-Name", previewFileName);
+        response.setHeader("X-Preview-Sample-Stride", String(cachedVirtualPreview.sampleStride));
+        response.setHeader("X-Original-Sample-Rate", String(cachedVirtualPreview.sourceHeader.sampleRate));
+        response.setHeader("X-Original-Sample-Count", String(cachedVirtualPreview.sourceHeader.sampleCount));
+        response.end(cachedVirtualPreview.previewFileBuffer);
         return;
     }
 
@@ -648,14 +982,15 @@ http.createServer((request, response) => {
     }
 
     if (request.method === "GET" && request.url === "/api/download") {
-        const filePath = "C:\\Users\\dmatzer\\Downloads\\eros-curve-2026-02-23T22-02-18-167Z.erosb";
+        const filePath = VIRTUAL_DEMO_FILE_PATH;
+        const fileName = basename(filePath);
         const stats = statSync(filePath);
 
         response.statusCode = 200;
         response.setHeader("Content-Type", "application/octet-stream");
         response.setHeader("Content-Length", String(stats.size));
-        response.setHeader("Content-Disposition", 'attachment; filename="eros-curve.erosb"');
-        response.setHeader("X-File-Name", "eros-curve.erosb");
+        response.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+        response.setHeader("X-File-Name", fileName);
 
         createReadStream(filePath).pipe(response);
         return;
@@ -663,8 +998,30 @@ http.createServer((request, response) => {
 
     // gRPC handler
     handler(request, response);
-}).listen(50051, "0.0.0.0", () => {
-    console.log("Server läuft auf http://localhost:50051");
-    console.log("REST API: POST /api/configure, GET /api/status");
-    console.log("RPC: StreamMeasurements, StreamBooleanStatus");
 });
+
+async function startServer() {
+    try {
+        console.log("[VirtualPreview] Building startup cache...");
+        const startedAt = Date.now();
+        const previewResult = await warmupVirtualPreviewCache();
+        const elapsedMs = Date.now() - startedAt;
+        console.log(
+            `[VirtualPreview] Startup cache ready (${previewResult.previewFileBuffer.byteLength} bytes, ` +
+            `stride=${previewResult.sampleStride}, ${elapsedMs} ms).`
+        );
+    } catch (error) {
+        console.error("[VirtualPreview] Startup cache build failed:", error);
+        process.exit(1);
+    }
+
+    server.listen(50051, "0.0.0.0", () => {
+        console.log("Server laeuft auf http://localhost:50051");
+        console.log("REST API: POST /api/configure, GET /api/status");
+        console.log("Virtual file API: HEAD/GET /api/virtual-file, GET /api/virtual-preview");
+        console.log(`Virtual source path: ${VIRTUAL_DEMO_FILE_PATH}`);
+        console.log("RPC: StreamMeasurements, StreamBooleanStatus");
+    });
+}
+
+void startServer();
